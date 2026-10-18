@@ -28,6 +28,8 @@ type: TDD
 - 提供测试、构建、部署的标准操作方式
 - 沉淀常见问题与排查思路
 
+**文档关系：** 本文档为详细开发指南；项目根目录 [`README.md`](../README.md) 为快速入口，含技术栈速览、快速开始与本文档的章节索引。两份文档互为补充，日常速查用 README，深入开发参考本文档。
+
 ### 1.2 项目背景
 
 FSP 是一个基于 **Nuxt 4** 的内容驱动型 Web 项目，使用 `@nuxt/content` 管理 Markdown 内容，集成 `@nuxt/ui` 组件库与 TipTap 富文本编辑器，并配套 Vitest + Playwright 双层测试体系。项目定位为竞赛作品（见 `.gitignore` 中关于"比赛项目"的注释），需上传至码道云平台。
@@ -95,36 +97,163 @@ Nuxt 4 默认采用 **混合渲染** 策略：
 
 ### 2.4 目录结构（Nuxt 4）
 
-Nuxt 4 引入了 `app/` 目录作为应用源码根目录，这是与 Nuxt 3 的主要区别之一：
+Nuxt 4 引入了 `app/` 目录作为应用源码根目录，这是与 Nuxt 3 的主要区别之一。同时新增 `shared/` 目录用于前后端共享代码。
 
-    fsp/
-    ├── app/                    # 应用源码（Nuxt 4 新结构）
-    │   ├── app.vue             # 根组件
-    │   ├── components/         # 自动导入的 Vue 组件
-    │   │   ├── Alert.vue
-    │   │   └── Counter.vue
-    │   └── pages/              # 文件路由页面
-    │       └── [...slug].vue   # catch-all 路由
-    ├── content/                # Markdown 内容源
+#### 2.4.1 Nuxt 4 标准目录结构（完整）
+
+    project-root/
+    ├── app/                         # 【应用源码】Nuxt 4 应用根目录
+    │   ├── app.vue                  #   根组件（必需，注入 <NuxtPage>）
+    │   ├── error.vue                #   错误页面（404/500 等统一展示）
+    │   ├── app.config.ts            #   应用运行时配置（响应式，客户端可改）
+    │   ├── assets/                  #   需构建处理的资源（CSS/字体/图片）
+    │   │   └── css/
+    │   │       └── main.css         #     全局样式入口
+    │   ├── components/              #   Vue 组件（自动导入）
+    │   │   ├── AppHeader.vue        #     → <AppHeader>
+    │   │   └── ui/
+    │   │       └── Button.vue       #     → <UiButton>（目录名作前缀）
+    │   ├── composables/             #   组合式函数（自动导入）
+    │   │   └── useUser.ts           #     → useUser()
+    │   ├── layouts/                 #   布局组件
+    │   │   ├── default.vue          #     默认布局
+    │   │   └── admin.vue            #     → definePageMeta({ layout: 'admin' })
+    │   ├── middleware/              #   路由中间件（命名约定决定执行时机）
+    │   │   ├── auth.ts              #     全局中间件（文件名无 .global）
+    │   │   └── setup.global.ts      #     全局中间件（.global 后缀，每次导航执行）
+    │   ├── pages/                   #   文件路由页面
+    │   │   ├── index.vue            #     → /
+    │   │   ├── about.vue            #     → /about
+    │   │   ├── users/
+    │   │   │   ├── index.vue        #     → /users
+    │   │   │   └── [id].vue         #     → /users/:id（动态路由）
+    │   │   └── [...slug].vue        #     → /*（catch-all 路由）
+    │   ├── plugins/                 #   插件（按文件名顺序执行）
+    │   │   └── 01.init.ts           #     数字前缀控制执行顺序
+    │   ├── utils/                   #   工具函数（自动导入）
+    │   │   └── format.ts            #     → format() 等导出函数
+    │   ├── stores/                  #   Pinia stores（需安装 @pinia/nuxt）
+    │   │   └── user.ts              #     → useUserStore()
+    │   └── modules/                 #   本地模块（项目级自定义模块）
+    │       └── my-module/
+    │           └── index.ts
+    ├── server/                      # 【服务端源码】Nitro 服务端
+    │   ├── api/                     #   API 路由（自动映射 /api/*）
+    │   │   ├── users.get.ts         #     GET  /api/users
+    │   │   ├── users.post.ts        #     POST /api/users
+    │   │   └── users/[id].get.ts    #     GET  /api/users/:id
+    │   ├── routes/                  #   服务端路由（映射根路径，非 /api）
+    │   │   └── sitemap.xml.ts       #     GET  /sitemap.xml
+    │   ├── middleware/              #   服务端中间件（每次请求执行）
+    │   │   └── log.ts
+    │   ├── plugins/                 #   服务端插件（启动时执行一次）
+    │   │   └── db.ts
+    │   ├── utils/                   #   服务端工具函数（自动导入）
+    │   │   └── db.ts
+    │   └── assets/                  #   服务端静态资源
+    ├── shared/                      # 【共享代码】前后端共用（Nuxt 4 新增）
+    │   ├── types/                   #   共享类型定义
+    │   │   └── user.ts
+    │   └── utils/                   #   共享工具函数（前后端自动导入）
+    │       └── validate.ts
+    ├── public/                      # 【静态资源】直接访问，不经过构建
+    │   ├── favicon.ico
+    │   ├── robots.txt
+    │   └── images/
+    ├── content/                     # 【内容源】@nuxt/content 的 Markdown
     │   ├── index.md
     │   └── about.md
-    ├── public/                 # 静态资源（直接访问）
+    ├── node_modules/                # 依赖（gitignore）
+    ├── .nuxt/                       # Nuxt 生成产物（gitignore，类型/路由等）
+    ├── .output/                     # 构建产物（gitignore）
+    ├── .data/                       # 内容数据缓存（gitignore）
+    ├── .nitro/                      # Nitro 产物（gitignore）
+    ├── .cache/                      # 缓存（gitignore）
+    ├── nuxt.config.ts               # Nuxt 主配置
+    ├── content.config.ts            # @nuxt/content 集合配置
+    ├── app.config.ts                # 应用配置（也可放 app/ 下）
+    ├── tsconfig.json                # TypeScript 配置（引用 .nuxt 生成）
+    ├── package.json                 # 依赖与脚本
+    └── .env                         # 环境变量（gitignore）
+
+#### 2.4.2 目录职责与自动导入规则
+
+| 目录 | 作用域 | 自动导入 | 说明 |
+|---|---|---|---|
+| `app/components/` | 客户端+服务端 | ✅ 组件 | 基于路径生成组件名，子目录作前缀 |
+| `app/composables/` | 客户端+服务端 | ✅ 函数 | 导出的 `useXxx` 函数全局可用 |
+| `app/utils/` | 客户端+服务端 | ✅ 函数 | 导出的工具函数全局可用 |
+| `app/plugins/` | 按配置 | ❌ 自动注册 | 文件即插件，按文件名顺序执行 |
+| `app/middleware/` | 客户端 | ❌ 需声明 | 非 global 需在页面 `definePageMeta` 中引用 |
+| `app/layouts/` | 客户端 | ✅ 布局 | 通过 `layout` 属性引用 |
+| `app/pages/` | 客户端+服务端 | ✅ 路由 | 文件路径即路由路径 |
+| `app/stores/` | 客户端+服务端 | ✅ store | 需安装 `@pinia/nuxt` |
+| `app/modules/` | 构建期 | ❌ 需在 nuxt.config 注册 | 本地模块 |
+| `server/api/` | 服务端 | ✅ 路由 | 映射为 `/api/*` |
+| `server/routes/` | 服务端 | ✅ 路由 | 映射为根路径 |
+| `server/middleware/` | 服务端 | ✅ 自动注册 | 每次请求执行 |
+| `server/plugins/` | 服务端 | ✅ 自动注册 | 启动时执行一次 |
+| `server/utils/` | 服务端 | ✅ 函数 | 服务端工具函数自动导入 |
+| `shared/types/` | 前后端 | ✅ 类型 | 共享类型定义 |
+| `shared/utils/` | 前后端 | ✅ 函数 | 前后端共享工具函数 |
+| `public/` | 直接访问 | — | 原样复制到输出，不构建 |
+| `app/assets/` | 需引用 | — | 需通过 `~/assets/` 引用，会构建处理 |
+
+#### 2.4.3 关键文件说明
+
+| 文件 | 必需 | 作用 |
+|---|---|---|
+| `app/app.vue` | ✅ | 根组件，必须包含 `<NuxtPage>` 或 `<NuxtLayout>` |
+| `app/error.vue` | ❌ | 自定义错误页，接收 `error` prop |
+| `nuxt.config.ts` | ✅ | Nuxt 配置入口 |
+| `app.config.ts` | ❌ | 运行时配置（区别于构建时配置，客户端可响应式修改） |
+| `content.config.ts` | ❌ | @nuxt/content 集合与 schema 定义 |
+| `tsconfig.json` | ✅ | TypeScript 配置，引用 `.nuxt/` 生成 |
+
+#### 2.4.4 `app/` 与 `server/` 与 `shared/` 的边界
+
+| 代码位置 | 运行环境 | 可用 API |
+|---|---|---|
+| `app/**` | 客户端 + 服务端（SSR） | Vue、Nuxt 组合式函数、浏览器 API（仅客户端） |
+| `server/**` | 仅服务端（Nitro） | `defineEventHandler`、Node.js API、数据库 |
+| `shared/**` | 前后端均可 | 纯逻辑代码，不依赖 Vue 或 Node 特有 API |
+
+**原则**：跨端复用的纯函数（类型、校验、格式化）放 `shared/`；仅服务端的逻辑放 `server/`；涉及 Vue 渲染的放 `app/`。
+
+#### 2.4.5 本项目实际结构
+
+本项目目前仅使用了上述标准结构的一部分（`server/` 为空，未使用 `layouts/`、`middleware/`、`plugins/` 等），实际结构如下：
+
+    fsp/
+    ├── app/                        # 应用源码
+    │   ├── app.vue                 #   根组件
+    │   ├── components/             #   自动导入组件
+    │   │   ├── Alert.vue
+    │   │   └── Counter.vue
+    │   └── pages/                  #   文件路由
+    │       └── [...slug].vue       #     catch-all 内容路由
+    ├── content/                    # Markdown 内容源
+    │   ├── index.md
+    │   └── about.md
+    ├── public/                     # 静态资源
     │   └── favicon.ico
-    ├── server/                 # 服务端代码（API/中间件）
-    ├── test/                   # 单元测试与 Nuxt 环境测试
+    ├── server/                     # 服务端代码（当前为空，可扩展）
+    ├── test/                       # 单元测试与 Nuxt 环境测试
     │   ├── unit/
     │   └── nuxt/
-    ├── tests/                  # E2E 测试（Playwright）
-    ├── docs/                   # 项目文档
-    ├── .nuxt/                  # Nuxt 生成产物（gitignore）
-    ├── .data/                  # 内容数据缓存（gitignore）
-    ├── nuxt.config.ts          # Nuxt 配置
-    ├── content.config.ts       # 内容集合配置
-    ├── tsconfig.json           # TypeScript 配置（引用 .nuxt 生成）
-    ├── vitest.config.ts        # Vitest 配置
-    ├── playwright.config.ts    # Playwright 配置
-    ├── eslint.config.mjs       # ESLint 配置
+    ├── tests/                      # E2E 测试（Playwright）
+    ├── docs/                       # 项目文档
+    ├── .nuxt/                      # Nuxt 生成产物（gitignore）
+    ├── .data/                      # 内容数据缓存（gitignore）
+    ├── nuxt.config.ts
+    ├── content.config.ts
+    ├── tsconfig.json
+    ├── vitest.config.ts
+    ├── playwright.config.ts
+    ├── eslint.config.mjs
     └── package.json
+
+**可扩展方向**：如需新增布局、中间件、API、插件等，按 2.4.1 标准结构在对应目录下创建文件即可，Nuxt 会自动识别。
 
 ---
 
@@ -395,7 +524,7 @@ Nuxt 采用基于文件的路由系统，`app/pages/` 下的 `.vue` 文件自动
 | 文件路径 | 组件名 |
 |---|---|
 | `app/components/Alert.vue` | `<Alert>` |
-| `app/components/Counter.vue` | `<Counter>` |
+| `../app/components/CounterBox.vue` | `<Counter>` |
 | `app/components/ui/Button.vue` | `<UiButton>` |
 
 ### 6.2 Alert 组件示例
@@ -1173,6 +1302,7 @@ Nuxt 支持多种部署目标，通过 `nuxt.config.ts` 的 `nitro.preset` 配�
 
 | 文件 | 说明 |
 |---|---|
+| `README.md` | 项目快速入口（技术栈/快速开始/文档索引） |
 | `nuxt.config.ts` | Nuxt 主配置 |
 | `content.config.ts` | 内容集合配置 |
 | `app/app.vue` | 根组件 |
