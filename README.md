@@ -24,7 +24,7 @@ npm install
 npm run dev
 ```
 
-启动后访问 `http://localhost:3000`。
+启动后访问 `http://localhost:3000`。会自动跳转一键部署页面。
 
 > 完整环境要求与多包管理器（pnpm/yarn/bun）用法见 [开发文档 §3 环境准备](./docs/TDD-Nuxt-Dev-Guide-202610181252.md#3-环境准备)。
 
