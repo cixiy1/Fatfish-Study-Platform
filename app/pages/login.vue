@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { safeRedirect } from "~/utils/auth"
+
 useHead({
   title: "登录 · FSP",
   meta: [{ name: "robots", content: "noindex" }],
@@ -13,6 +15,12 @@ const form = reactive({
 const showPassword = ref(false)
 const loading = ref(false)
 const message = ref("")
+
+const route = useRoute()
+const { login } = useAuthSession()
+
+// 被中间件拦下来时带的回跳地址，登录成功后原路返回
+const redirectTo = computed(() => safeRedirect(route.query.redirect))
 
 function validate(state: typeof form) {
   const errors: { name: string; message: string }[] = []
@@ -31,20 +39,22 @@ async function onSubmit() {
   loading.value = true
   message.value = ""
 
-  // TODO: 接入真实登录接口，替换下面的占位逻辑
-  // await $fetch("/api/auth/login", {
-  //   method: "POST",
-  //   body: { account: form.account, password: form.password, remember: form.remember },
-  // })
-  await new Promise((resolve) => setTimeout(resolve, 600))
+  try {
+    await login(form.account, form.password, form.remember)
+    // 登录成功后回到被拦截的那一页，没有回跳地址就回首页
+    await navigateTo(redirectTo.value ?? "/", { replace: true })
+  } catch (error) {
+    message.value = errorMessage(error)
+  } finally {
+    loading.value = false
+  }
+}
 
-  loading.value = false
-  message.value = "登录接口尚未接入（占位）：表单数据已输出到控制台"
-  console.info("[login] submit", {
-    account: form.account,
-    password: "********",
-    remember: form.remember,
-  })
+/** 从 $fetch 抛出的 FetchError 里取可读文案 */
+function errorMessage(error: unknown) {
+  const data = (error as { data?: { statusMessage?: string; message?: string } })
+    ?.data
+  return data?.statusMessage || data?.message || "登录失败，请稍后重试"
 }
 
 function placeholder(feature: string) {
@@ -104,7 +114,13 @@ function placeholder(feature: string) {
     <section class="flex items-center justify-center px-5 py-12">
       <div class="w-full max-w-sm">
         <h1 class="text-2xl font-semibold tracking-tight">登录</h1>
-        <p class="mt-2 text-sm text-muted">使用账号继续，或先浏览公开内容。</p>
+        <p class="mt-2 text-sm text-muted">
+          {{
+            redirectTo
+              ? `登录后继续访问 ${redirectTo}`
+              : "使用账号继续，或先浏览公开内容。"
+          }}
+        </p>
 
         <UForm
           :state="form"
