@@ -1,0 +1,21 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+@theme {
+  --font-sans:
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui,
+    -apple-system, "Segoe UI", sans-serif;
+}
+
+/*
+ * Nuxt UI 默认 primary 取 *-500，白字压在上面对比度只有约 2.3:1，不满足 WCAG AA。
+ * 浅色模式压到 700（约 5.4:1），深色模式维持 400（此时文字是深色，对比度足够）。
+ */
+:root {
+  --ui-primary: var(--ui-color-primary-700);
+}
+
+.dark {
+  --ui-primary: var(--ui-color-primary-400);
+}
+
