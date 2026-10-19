@@ -1,4 +1,15 @@
+<script setup lang="ts">
+useHead({
+  title: "FSP",
+  htmlAttrs: { lang: "zh-CN" },
+})
+</script>
+
 <template>
-  <NuxtRouteAnnouncer />
-  <NuxtPage />
+  <UApp>
+    <NuxtRouteAnnouncer />
+    <main>
+      <NuxtPage />
+    </main>
+  </UApp>
 </template>

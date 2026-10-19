@@ -1,18 +1,17 @@
 <script setup lang="ts">
 const route = useRoute()
 
-const { data: page } = await useAsyncData('page-' + route.path, () => {
-  return queryCollection('content').path(route.path).first()
+useHead({
+  title: () => `${route.path} · FSP`,
 })
-
-if (!page.value) {
-  throw createError({ statusCode: 404, statusMessage: 'Page not found', fatal: true })
-}
 </script>
 
 <template>
-  <ContentRenderer
-    v-if="page"
-    :value="page"
-  />
+  <div>
+    <h1>Hello World</h1>
+  </div>
 </template>
+
+<script lang="ts">
+console.log("Hello")
+</script>
