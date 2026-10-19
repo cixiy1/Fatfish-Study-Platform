@@ -30,6 +30,48 @@ npm run dev
 
 ---
 
+## 首次部署（install 向导）
+
+项目**首次部署**到服务器后，需在浏览器内完成初始化：
+
+1. 启动服务：
+
+```
+npm run build
+node .output/server/index.mjs
+```
+
+2. 访问服务器地址（任意页面），会自动引导至 `/install`
+3. 在 `/install` 填写：
+   - **数据库配置**：SQLite 数据文件路径（默认 `data/fsp.db`），可点「测试连接」验证
+   - **管理员账号**：账号、密码（≥8 位且含字母和数字）、昵称、邮箱
+   - **站点信息**：站点名称、站点地址（用于邮件验证链接与 OAuth 回调）
+   - **SMTP 邮件配置（可选）**：预设 Gmail/QQ/163 或自定义，配置后注册用户可收到验证邮件
+   - **OAuth 第三方登录（可选）**：GitHub/QQ/微信凭证，可跳过后续在管理后台配置
+4. 点击「开始安装」，系统依次执行：测试连接 → 建表 → 创建管理员 → 写入配置 → 可选保存 SMTP/OAuth → 标记已安装
+5. 配置持久化在 `data/config.json`（已被 gitignore），重启后生效；已安装后 `/install` 不可再访问
+
+> 部署形态为 **Nitro 一体（前后端不分离）**，页面与接口同进程。无需手工建库，SQLite 文件在安装时自动生成。
+> 可选环境变量见 [.env.example](./.env.example)（`FSP_DATA_DIR` 数据目录、`FSP_SESSION_SECRET` 会话密钥）。
+
+---
+
+## 功能概览
+
+| 功能 | 说明 |
+|---|---|
+| **账号密码登录** | 管理员与注册用户均可通过 `/login` 登录，支持「记住我」7 天会话 |
+| **邮箱注册** | 访客通过 `/register` 自助注册，注册后需邮件验证激活（status: pending → active） |
+| **邮件验证** | 注册后发送验证邮件（需配置 SMTP），点击链接激活账号并自动登录；SMTP 未配置时提示联系管理员 |
+| **第三方登录** | GitHub / QQ / 微信 OAuth 登录（需在管理后台配置凭证）；凭证未配置时返回 501 |
+| **管理后台** | `/admin` 路由（仅管理员），可配置 SMTP 邮件与 OAuth 凭证、测试邮件发送 |
+| **安装向导** | `/install` 首次部署向导，支持数据库/管理员/站点/SMTP/OAuth 一步配置 |
+| **内容管理** | 基于 `@nuxt/content` 的 Markdown 内容驱动（待后续迭代） |
+
+> 安全特性：scrypt 密码哈希、HMAC-SHA256 签名会话、AES-256-GCM 加密敏感配置、防账号枚举（统一 409）、注册限流（60s/5 次）。
+
+---
+
 ## 技术栈
 
 | 分类 | 技术 | 版本 |
@@ -52,18 +94,36 @@ npm run dev
 
 ```
 fsp/
-├── app/                # 应用源码（Nuxt 4 目录结构）
-│   ├── app.vue         #   根组件
-│   ├── components/     #   自动导入组件（Alert / Counter）
-│   └── pages/          #   文件路由（[...slug].vue catch-all）
-├── content/            # Markdown 内容源
-├── public/             # 静态资源
-├── server/             # 服务端代码（API/中间件）
-├── test/               # 单元测试与 Nuxt 环境测试
-├── tests/              # E2E 测试（Playwright）
-├── docs/               # 项目文档
-├── nuxt.config.ts      # Nuxt 配置
-├── content.config.ts   # 内容集合配置
+├── app/                    # 应用源码（Nuxt 4 目录结构）
+│   ├── app.vue             #   根组件
+│   ├── error.vue           #   错误页（401/403/404/500）
+│   ├── app.config.ts       #   应用配置（UI 主题色）
+│   ├── assets/css/         #   全局样式入口
+│   ├── components/         #   自动导入组件
+│   ├── composables/        #   useAuth / useToggle / useInstall
+│   ├── layouts/            #   布局（default.vue）
+│   ├── middleware/         #   登录守卫 + 安装守卫
+│   ├── pages/              #   index / login / account / test / install / [...slug]
+│   ├── plugins/            #   插件（01.init.ts）
+│   ├── types/              #   PageMeta 类型扩展
+│   └── utils/              #   工具函数（auth / format）
+├── server/                 # 服务端代码（Nitro）
+│   ├── api/                #   auth/*、install/*、health
+│   ├── middleware/         #   请求日志、安装守卫
+│   ├── repositories/       #   数据访问层（user.repository）
+│   └── utils/              #   db / schema / password / crypto / session / installer / app-config
+├── shared/                 # 前后端共享代码
+│   ├── types/              #   index / install
+│   └── utils/              #   validate / validate-install
+├── data/                   # 运行时数据（config.json + sqlite，gitignore）
+├── content/                # Markdown 内容源（当前为空，待填充）
+├── public/                 # 静态资源
+├── test/                   # 单元测试与 Nuxt 环境测试
+├── tests/                  # E2E 测试（Playwright）
+├── docs/                   # 项目文档
+├── nuxt.config.ts          # Nuxt 配置
+├── content.config.ts       # 内容集合配置
+├── .env.example            # 环境变量示例
 └── package.json
 ```
 
@@ -101,21 +161,20 @@ npm run preview     # 本地预览生产构建
 
 ## 内容管理
 
-在 `content/` 目录下创建 Markdown 文件即可自动生成页面：
+在 `content/` 目录下创建 Markdown 文件即可自动生成页面（路径即 URL）：
 
-- `content/index.md` → `/`
+- `content/hello.md` → `/hello`
 - `content/about.md` → `/about`
 
-支持 MDC 语法，可在 Markdown 中嵌入 Vue 组件：
+支持 MDC 语法，可在 Markdown 中嵌入 `app/components/` 下的 Vue 组件：
 
 ```
-::alert{color="green"}
-这是 Alert 组件
-::
-
-::counter
+::my-component{title="示例"}
+组件内容
 ::
 ```
+
+> 注：Nuxt Starter 自带的示例内容（`content/index.md`、`about.md`）与示例组件（Alert / Counter）已移除，`content/` 目录当前为空。
 
 内容管理详解见 [开发文档 §7 内容管理](./docs/TDD-Nuxt-Dev-Guide-202610181252.md#7-内容管理nuxtcontent)。
 

@@ -1,6 +1,12 @@
 export interface AuthUser {
 	account: string
 	name: string
+	role?: string
+	email?: string | null
+	status?: string | null
+	career_direction?: string | null
+	assessment_completed?: number
+	has_learning_path?: boolean
 }
 
 /**
@@ -71,6 +77,17 @@ export function useAuthSession() {
 		return data.user
 	}
 
+	async function register(account: string, email: string, password: string, name?: string) {
+		return await $fetch<{
+			user: { account: string, name: string }
+			emailSent: boolean
+			message: string
+		}>("/api/auth/register", {
+			method: "POST",
+			body: { account, email, password, name },
+		})
+	}
+
 	async function logout(redirect = "/login") {
 		await $fetch("/api/auth/logout", { method: "POST" }).catch(() => {
 			// 退出失败也要清本地态，否则页面会卡在"已登录"
@@ -85,6 +102,7 @@ export function useAuthSession() {
 		isLoggedIn,
 		resolveUser,
 		login,
+		register,
 		logout,
 	}
 }

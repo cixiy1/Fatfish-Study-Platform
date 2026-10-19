@@ -45,6 +45,9 @@ FSP 是一个基于 **Nuxt 4** 的内容驱动型 Web 项目，使用 `@nuxt/con
 - 图片优化（`@nuxt/image`）
 - 三层测试体系（单元 / Nuxt 环境 / E2E）
 - 全 TypeScript 开发
+- 完整认证体系：账号密码登录、邮箱注册 + 邮件验证、OAuth 第三方登录（GitHub / QQ / 微信）
+- 管理员后台：SMTP 邮件配置、OAuth 凭证管理、用户列表
+- 首次部署 `/install` 向导：数据库 + 管理员 + 站点 + SMTP + OAuth（可选）一步配置
 
 ---
 
@@ -71,6 +74,8 @@ FSP 是一个基于 **Nuxt 4** 的内容驱动型 Web 项目，使用 `@nuxt/con
 | DOM 模拟 | happy-dom | ^21.0.3 | 测试 DOM 环境 |
 | 富文本 | @tiptap/* | ^3.32.0 | 富文本编辑器 |
 | 数据库 | better-sqlite3 | ^13.0.3 | SQLite（内容存储） |
+| 邮件 | nodemailer | ^10.1.7 | SMTP 邮件发送（注册验证） |
+| OAuth | arctic | ^3.7.0 | GitHub OAuth 客户端 |
 
 ### 2.2 Nuxt 模块体系
 
@@ -222,29 +227,88 @@ Nuxt 4 引入了 `app/` 目录作为应用源码根目录，这是与 Nuxt 3 的
 
 #### 2.4.5 本项目实际结构
 
-本项目目前仅使用了上述标准结构的一部分（`server/` 为空，未使用 `layouts/`、`middleware/`、`plugins/` 等），实际结构如下：
+本项目采用认证型内容站结构，已具备完整的登录态、数据库持久化、首次部署向导与前后端分层，实际结构如下：
 
     fsp/
-    ├── app/                        # 应用源码
-    │   ├── app.vue                 #   根组件
-    │   ├── components/             #   自动导入组件
-    │   │   ├── Alert.vue
-    │   │   └── Counter.vue
-    │   └── pages/                  #   文件路由
-    │       └── [...slug].vue       #     catch-all 内容路由
-    ├── content/                    # Markdown 内容源
-    │   ├── index.md
-    │   └── about.md
-    ├── public/                     # 静态资源
-    │   └── favicon.ico
-    ├── server/                     # 服务端代码（当前为空，可扩展）
-    ├── test/                       # 单元测试与 Nuxt 环境测试
+    ├── app/                          # 应用源码
+    │   ├── app.vue                   #   根组件（UApp + main + NuxtPage）
+    │   ├── app.config.ts             #   应用配置（UI 主题色）
+    │   ├── error.vue                 #   错误页（401/403/404/500）
+    │   ├── assets/css/main.css       #   全局样式入口（TailwindCSS）
+    │   ├── components/               #   自动导入组件（待补充业务组件）
+    │   ├── composables/              #   组合式函数（自动导入）
+    │   │   ├── useAuth.ts            #     登录态
+    │   │   ├── useInstall.ts         #     安装向导逻辑
+    │   │   └── useToggle.ts          #     布尔状态切换
+    │   ├── layouts/                  #   布局
+    │   │   └── default.vue           #     默认布局
+    │   ├── middleware/               #   路由中间件
+    │   │   ├── a.CheckUser.global.ts #     全局登录守卫
+    │   │   ├── b.Install.global.ts   #     安装守卫（未安装引导 /install）
+    │   │   └── c.Admin.global.ts     #     管理员守卫（/admin/* 需 admin 角色）
+    │   ├── pages/                    #   文件路由
+    │   │   ├── index.vue             #     /
+    │   │   ├── login.vue             #     /login
+    │   │   ├── register.vue          #     /register（邮箱注册）
+    │   │   ├── account.vue           #     /account
+    │   │   ├── test.vue              #     /test
+    │   │   ├── install.vue           #     /install（首次部署向导）
+    │   │   ├── admin/                #     /admin/*（管理员后台）
+    │   │   │   ├── index.vue         #       用户列表
+    │   │   │   ├── smtp.vue          #       SMTP 配置
+    │   │   │   └── oauth.vue         #       OAuth 凭证配置
+    │   │   └── [...slug].vue         #     /*（catch-all）
+    │   ├── plugins/                  #   插件
+    │   │   └── 01.init.ts
+    │   ├── types/page-meta.d.ts      #   PageMeta/RouteMeta 类型扩展
+    │   └── utils/                    #   工具函数（自动导入）
+    │       ├── auth.ts               #     GUEST_ONLY_PATHS / safeRedirect
+    │       └── format.ts             #     formatDate / formatDateTime
+    ├── server/                       # 服务端代码（Nitro）
+    │   ├── api/
+    │   │   ├── auth/                 #     login / logout / me / register / verify-email
+    │   │   │   ├── github.get.ts     #       GitHub OAuth 跳转
+    │   │   │   ├── github/callback.get.ts  #  GitHub OAuth 回调
+    │   │   │   ├── qq.get.ts         #       QQ OAuth 跳转
+    │   │   │   ├── qq/callback.get.ts#       QQ OAuth 回调
+    │   │   │   ├── wechat.get.ts     #       微信 OAuth 跳转
+    │   │   │   └── wechat/callback.get.ts #  微信 OAuth 回调
+    │   │   ├── admin/                #     管理员接口（settings / test-smtp / user-count）
+    │   │   ├── install/              #     status / test-connection / setup
+    │   │   └── health.get.ts         #     GET /api/health
+    │   ├── middleware/
+    │   │   ├── install-guard.ts      #     未安装时拦截业务 API
+    │   │   └── log.ts                #     请求日志
+    │   ├── repositories/
+    │   │   ├── user.repository.ts    #     用户数据访问层
+    │   │   ├── settings.repository.ts#     系统配置（SMTP/OAuth 加密存取）
+    │   │   └── email-verification.repository.ts # 邮件验证 token
+    │   └── utils/
+    │       ├── app-config.ts         #     配置读写（data/config.json）
+    │       ├── db.ts                 #     SQLite 连接单例
+    │       ├── schema.ts             #     表结构 + 幂等迁移（v1/v2/v3）
+    │       ├── password.ts           #     scrypt 密码哈希
+    │       ├── crypto.ts             #     HMAC 签名 + AES-256-GCM 对称加密
+    │       ├── session.ts            #     签名会话 cookie
+    │       ├── installer.ts          #     安装初始化逻辑
+    │       ├── api-response.ts       #     统一响应封装
+    │       ├── rate-limit.ts         #     进程内限流（60s/5 次 → 429）
+    │       ├── email.ts              #     nodemailer 封装（验证邮件 + 测试邮件）
+    │       ├── oauth.ts              #     OAuth 封装（GitHub 用 arctic，QQ/微信手写）
+    │       └── admin-guard.ts        #     管理员权限守卫
+    ├── shared/                       # 前后端共享代码
+    │   ├── types/                    #   index / install / auth
+    │   └── utils/                    #   validate / validate-install
+    ├── data/                         # 运行时数据（config.json + SQLite，gitignore）
+    ├── content/                      # Markdown 内容源（当前为空，待填充）
+    ├── public/                       # 静态资源
+    ├── test/                         # 单元与 Nuxt 环境测试
     │   ├── unit/
     │   └── nuxt/
-    ├── tests/                      # E2E 测试（Playwright）
-    ├── docs/                       # 项目文档
-    ├── .nuxt/                      # Nuxt 生成产物（gitignore）
-    ├── .data/                      # 内容数据缓存（gitignore）
+    ├── tests/                        # E2E 测试（Playwright）
+    ├── docs/                         # 项目文档（含 requirements/）
+    ├── .nuxt/                        # Nuxt 生成产物（gitignore）
+    ├── .env.example                  # 环境变量示例
     ├── nuxt.config.ts
     ├── content.config.ts
     ├── tsconfig.json
@@ -253,7 +317,7 @@ Nuxt 4 引入了 `app/` 目录作为应用源码根目录，这是与 Nuxt 3 的
     ├── eslint.config.mjs
     └── package.json
 
-**可扩展方向**：如需新增布局、中间件、API、插件等，按 2.4.1 标准结构在对应目录下创建文件即可，Nuxt 会自动识别。
+**说明**：项目已接入完整认证体系（`useAuth` + 全局守卫 + `/api/auth/*`：账号密码登录、邮箱注册 + 邮件验证、GitHub/QQ/微信 OAuth 第三方登录）、管理员后台（`/admin/*`：SMTP/OAuth 配置管理）、数据库持久层（SQLite + 原生 SQL + scrypt 密码哈希 + HMAC 签名会话 + AES-256-GCM 对称加密）与首次部署 install 向导（`/install` 网页内完成数据库/管理员/站点/SMTP/OAuth 配置）。新增依赖：`nodemailer`（邮件发送）、`arctic`（GitHub OAuth）。Nuxt Starter 自带的示例组件（Alert/Counter）与示例内容（`content/index.md`、`about.md`）已移除。数据库文件与配置落在 `data/`（gitignore）。新增页面/组件/接口时，按 2.4.1 标准结构在对应目录创建文件即可，Nuxt 会自动识别。
 
 ---
 
@@ -523,74 +587,69 @@ Nuxt 采用基于文件的路由系统，`app/pages/` 下的 `.vue` 文件自动
 
 | 文件路径 | 组件名 |
 |---|---|
-| `app/components/Alert.vue` | `<Alert>` |
-| `../app/components/CounterBox.vue` | `<Counter>` |
-| `app/components/ui/Button.vue` | `<UiButton>` |
+| `app/components/UserCard.vue` | `<UserCard>` |
+| `app/components/AppHeader.vue` | `<AppHeader>` |
+| `app/components/ui/Button.vue` | `<UiButton>`（目录名作前缀） |
 
-### 6.2 Alert 组件示例
-
-    <template>
-      <div class="alert" :style="{ 'border-color': color }">
-        <slot></slot>
-      </div>
-    </template>
+### 6.2 基础组件示例
 
     <script setup lang="ts">
-    const { color } = defineProps({
-      color: {
-        type: String,
-        default: 'orange'
-      }
+    interface Props {
+      title: string
+      description?: string
+    }
+
+    const props = withDefaults(defineProps<Props>(), {
+      description: ""
     })
     </script>
 
-    <style scoped>
-    .alert {
-      display: flex;
-      align-items: center;
-      padding: 1rem;
-      border: 2px solid;
-      border-radius: 0.5rem;
-      background-color: #fff;
-      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-      transition: transform 0.2s ease, box-shadow 0.2s ease;
-    }
-
-    .alert:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);
-    }
-    </style>
+    <template>
+      <div class="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
+        <h3 class="font-semibold">
+          {{ props.title }}
+        </h3>
+        <p v-if="props.description" class="mt-1 text-sm text-neutral-500">
+          {{ props.description }}
+        </p>
+        <slot />
+      </div>
+    </template>
 
 **要点：**
 
 - 使用 `<script setup lang="ts">` 语法糖 + TypeScript
-- `defineProps` 声明 props，支持默认值
+- `defineProps` 声明 props，`withDefaults` 提供默认值
 - `<slot>` 插槽接收子内容
-- `<style scoped>` 局部样式，仅作用于当前组件
+- 优先使用 TailwindCSS 原子类，复杂样式再用 `<style scoped>`
 
-### 6.3 Counter 组件示例
-
-    <template>
-      <div>
-        <h3>Counter: {{ count }}</h3>
-        <button @click="increment">Increment</button>
-        <button @click="decrement">Decrement</button>
-      </div>
-    </template>
+### 6.3 有状态组件示例
 
     <script setup lang="ts">
     const count = ref(0)
 
-    const increment = () => { count.value++ }
-    const decrement = () => { count.value-- }
+    function increment() {
+      count.value++
+    }
+
+    function decrement() {
+      count.value--
+    }
     </script>
+
+    <template>
+      <div>
+        <h3>Count: {{ count }}</h3>
+        <UButton @click="increment">增加</UButton>
+        <UButton color="neutral" variant="outline" @click="decrement">减少</UButton>
+      </div>
+    </template>
 
 **要点：**
 
-- `ref` 自动导入，无需 import
-- `count.value` 在 `<script>` 中访问，`{{ count }}` 在 `<template>` 中自动解包
-- 事件绑定使用 `@click`
+- `ref` 自动导入，无需手动 import
+- `<script>` 中通过 `count.value` 访问，`<template>` 中 `{{ count }}` 自动解包
+- 交互按钮优先使用 `@nuxt/ui` 的 `UButton`
 
 ### 6.4 组件通信规范
 
@@ -651,24 +710,23 @@ Nuxt 采用基于文件的路由系统，`app/pages/` 下的 `.vue` 文件自动
 
 ### 7.2 Markdown 示例
 
-`content/index.md`：
+> 说明：Nuxt Starter 自带的示例内容（`content/index.md`、`content/about.md`）已移除，`content/` 目录当前为空。新建 Markdown 文件后，访问同名路径即可。
 
-    # Welcome to Nuxt Content Starter
+`content/hello.md`：
 
-    This is the main page displaying Markdown.
+    ---
+    title: Hello
+    description: 我的第一篇内容
+    ---
 
-    Move to [about](/about) page.
+    # Hello Content
 
-    ## Manage your Contents
+    这是一个 Markdown 页面示例，支持**加粗**、*斜体*、[链接](/about)、`行内代码`等语法。
 
-    Create new pages or modify the existing ones in `content/` directory.
+    ## 列表
 
-    ::alert{color="green"}
-    The current alert and the counter below are Vue components integrated into the Markdown.
-    ::
-
-    ::counter
-    ::
+    - 列表项一
+    - 列表项二
 
 ### 7.3 MDC 语法（Markdown Components）
 
@@ -1302,13 +1360,57 @@ Nuxt 支持多种部署目标，通过 `nuxt.config.ts` 的 `nitro.preset` 配�
 
 | 文件 | 说明 |
 |---|---|
-| `README.md` | 项目快速入口（技术栈/快速开始/文档索引） |
+| `README.md` | 项目快速入口（技术栈/快速开始/首次部署/文档索引） |
 | `nuxt.config.ts` | Nuxt 主配置 |
 | `content.config.ts` | 内容集合配置 |
+| `.env.example` | 环境变量示例（FSP_DATA_DIR / FSP_SESSION_SECRET） |
 | `app/app.vue` | 根组件 |
-| `app/pages/[...slug].vue` | catch-all 内容路由 |
-| `app/components/Alert.vue` | Alert 组件示例 |
-| `app/components/Counter.vue` | Counter 组件示例 |
+| `app/error.vue` | 错误页（401/403/404/500） |
+| `app/layouts/default.vue` | 默认布局 |
+| `app/plugins/01.init.ts` | 插件示例 |
+| `app/composables/useAuth.ts` | 登录态组合式函数（含 register 方法） |
+| `app/composables/useToggle.ts` | 布尔切换组合式函数 |
+| `app/composables/useInstall.ts` | 安装向导逻辑 |
+| `app/middleware/a.CheckUser.global.ts` | 全局登录守卫 |
+| `app/middleware/b.Install.global.ts` | 安装守卫（未安装引导 /install） |
+| `app/middleware/c.Admin.global.ts` | 管理员守卫（/admin/* 需 admin 角色） |
+| `app/utils/auth.ts` | 认证工具（GUEST_ONLY_PATHS / safeRedirect） |
+| `app/utils/format.ts` | 日期格式化工具 |
+| `app/pages/register.vue` | 邮箱注册页 |
+| `app/pages/install.vue` | 首次部署 install 向导页（含 SMTP/OAuth 可选配置） |
+| `app/pages/admin/index.vue` | 管理员后台 - 用户列表 |
+| `app/pages/admin/smtp.vue` | 管理员后台 - SMTP 配置 |
+| `app/pages/admin/oauth.vue` | 管理员后台 - OAuth 凭证配置 |
+| `app/pages/[...slug].vue` | catch-all 路由 |
+| `server/repositories/user.repository.ts` | 用户数据访问层（含 OAuth/邮箱查询） |
+| `server/repositories/settings.repository.ts` | 系统配置数据访问层（SMTP/OAuth 加密存取） |
+| `server/repositories/email-verification.repository.ts` | 邮件验证 token 数据访问层 |
+| `server/utils/app-config.ts` | 配置读写（data/config.json） |
+| `server/utils/db.ts` | SQLite 连接单例 |
+| `server/utils/schema.ts` | 表结构与幂等迁移（v1/v2/v3） |
+| `server/utils/password.ts` | scrypt 密码哈希 |
+| `server/utils/crypto.ts` | HMAC 签名 + AES-256-GCM 对称加密 |
+| `server/utils/session.ts` | 签名会话管理 |
+| `server/utils/installer.ts` | 安装初始化逻辑（含 SMTP/OAuth） |
+| `server/utils/api-response.ts` | 统一响应封装 |
+| `server/utils/rate-limit.ts` | 进程内限流（60s/5 次 → 429） |
+| `server/utils/email.ts` | nodemailer 封装（验证邮件 + 测试邮件） |
+| `server/utils/oauth.ts` | OAuth 封装（GitHub 用 arctic，QQ/微信手写） |
+| `server/utils/admin-guard.ts` | 管理员权限守卫 |
+| `server/api/auth/` | 认证接口（login / logout / me / register / verify-email） |
+| `server/api/auth/github*.ts` | GitHub OAuth 跳转 + 回调 |
+| `server/api/auth/qq*.ts` | QQ OAuth 跳转 + 回调 |
+| `server/api/auth/wechat*.ts` | 微信 OAuth 跳转 + 回调 |
+| `server/api/admin/` | 管理员接口（settings / test-smtp / user-count） |
+| `server/api/install/` | 安装接口（status / test-connection / setup） |
+| `server/api/health.get.ts` | 健康检查接口 |
+| `server/middleware/install-guard.ts` | 未安装时拦截业务 API |
+| `server/middleware/log.ts` | 请求日志中间件 |
+| `shared/types/index.ts` | 共享类型（ApiResponse 等） |
+| `shared/types/install.ts` | 安装相关类型（含 SMTP/OAuth 可选字段） |
+| `shared/types/auth.ts` | 认证相关共享类型（OAuthProvider / SmtpConfig / OAuthCredentials 等） |
+| `shared/utils/validate.ts` | 共享校验函数 |
+| `shared/utils/validate-install.ts` | 安装表单校验（含 SMTP/OAuth 校验） |
 | `vitest.config.ts` | 单元/组件测试配置 |
 | `playwright.config.ts` | E2E 测试配置 |
 | `eslint.config.mjs` | ESLint 配置 |
@@ -1329,4 +1431,4 @@ Nuxt 支持多种部署目标，通过 `nuxt.config.ts` 的 `nitro.preset` 配�
 
 ---
 
-**文档结束** | FSP 项目 | 2026-10-18
+**文档结束** | FSP 项目 | 2026-10-19（更新：认证体系）

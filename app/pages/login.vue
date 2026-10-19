@@ -22,6 +22,24 @@ const { login } = useAuthSession()
 // 被中间件拦下来时带的回跳地址，登录成功后原路返回
 const redirectTo = computed(() => safeRedirect(route.query.redirect))
 
+// URL 参数提示（注册成功 / 邮箱验证结果）
+const urlAlert = computed<{ color: "success" | "error", text: string } | null>(() => {
+  if (route.query.registered === "1") {
+    return { color: "success", text: "注册成功，请登录" }
+  }
+  const errorMap: Record<string, string> = {
+    invalid_token: "验证链接无效",
+    token_used: "验证链接已使用，请直接登录",
+    token_expired: "验证链接已过期，请重新注册或联系管理员",
+    user_not_found: "用户不存在",
+  }
+  const err = route.query.error as string | undefined
+  if (err && errorMap[err]) {
+    return { color: "error", text: errorMap[err] }
+  }
+  return null
+})
+
 function validate(state: typeof form) {
   const errors: { name: string; message: string }[] = []
 
@@ -54,11 +72,7 @@ async function onSubmit() {
 function errorMessage(error: unknown) {
   const data = (error as { data?: { statusMessage?: string; message?: string } })
     ?.data
-  return data?.statusMessage || data?.message || "登录失败，请稍后重试"
-}
-
-function placeholder(feature: string) {
-  message.value = `${feature} 功能占位，待接入`
+  return data?.message || data?.statusMessage || "登录失败，请稍后重试"
 }
 </script>
 
@@ -122,6 +136,13 @@ function placeholder(feature: string) {
           }}
         </p>
 
+        <UAlert
+          v-if="urlAlert"
+          :color="urlAlert.color"
+          :title="urlAlert.text"
+          class="mb-4"
+        />
+
         <UForm
           :state="form"
           :validate="validate"
@@ -169,7 +190,7 @@ function placeholder(feature: string) {
               variant="link"
               size="sm"
               label="忘记密码？"
-              @click="placeholder('找回密码')"
+              to="/forgot-password"
             />
           </div>
 
@@ -192,24 +213,36 @@ function placeholder(feature: string) {
 
         <USeparator label="或" class="my-6" />
 
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-3 gap-3">
           <UButton
             color="neutral"
             variant="outline"
             size="lg"
             block
-            @click="placeholder('微信登录')"
+            to="/api/auth/github"
+            external
           >
-            微信
+            GitHub
           </UButton>
           <UButton
             color="neutral"
             variant="outline"
             size="lg"
             block
-            @click="placeholder('GitHub 登录')"
+            to="/api/auth/qq"
+            external
           >
-            GitHub
+            QQ
+          </UButton>
+          <UButton
+            color="neutral"
+            variant="outline"
+            size="lg"
+            block
+            to="/api/auth/wechat"
+            external
+          >
+            微信
           </UButton>
         </div>
 
@@ -220,7 +253,7 @@ function placeholder(feature: string) {
             variant="link"
             size="sm"
             label="注册"
-            @click="placeholder('注册')"
+            to="/register"
           />
         </p>
       </div>

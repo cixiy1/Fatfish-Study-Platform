@@ -48,4 +48,11 @@ export default defineNuxtRouteMiddleware(async (to) => {
 			replace: true,
 		})
 	}
+
+	// 已登录但尚未选择学习方向 → 仅对依赖学习路径的页面跳转到 onboarding
+	// assessment/positions/account 等页面不强制，用户可自由浏览
+	const REQUIRES_LEARNING_PATH = ["/learning", "/qa", "/reports"]
+	if (loggedIn && !user?.has_learning_path && REQUIRES_LEARNING_PATH.some((p) => to.path.startsWith(p))) {
+		return navigateTo("/onboarding", { replace: true })
+	}
 })

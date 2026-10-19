@@ -5,7 +5,9 @@
 export const GUEST_ONLY_PATHS = [
 	"/login",
 	"/register",
+	"/install",
 	"/forgot-password",
+	"/reset-password",
 ] as const
 
 /**
