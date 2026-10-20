@@ -349,6 +349,34 @@ const MIGRATIONS: Migration[] = [
 			CREATE INDEX IF NOT EXISTS idx_mastery_path ON mastery_checks(path_id);
 		`,
 	},
+	{
+		version: 7,
+		name: "assessment_questions_dynamic_batches",
+		sql: `
+			-- 动态出题落库：此前模型出的题不入库，分析时却读 DB 的固定种子题，
+			-- 导致「题数不匹配直接 400」或「题目与答案错位配对」。
+			-- 加了 owner/batch 之后，分析可以按批次取回当时真正展示给用户的那套题。
+			ALTER TABLE assessment_questions ADD COLUMN owner_user_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
+			ALTER TABLE assessment_questions ADD COLUMN batch_id TEXT;
+			ALTER TABLE assessment_questions ADD COLUMN source TEXT NOT NULL DEFAULT 'seed';
+
+			CREATE INDEX IF NOT EXISTS idx_aq_batch ON assessment_questions(batch_id);
+			CREATE INDEX IF NOT EXISTS idx_aq_owner ON assessment_questions(owner_user_id);
+		`,
+	},
+	{
+		version: 8,
+		name: "learning_resources_direction",
+		sql: `
+			-- 课程资料记录「为哪个学习方向生成」。
+			-- 技能是全局共享的（同名技能可挂到多个方向），此前复用资料时
+			-- 不区分方向，导致英语四级的路径挂上韩语方向生成的课文。
+			-- 复用规则改为：只复用 position_id 与当前方向一致的资料。
+			ALTER TABLE learning_resources ADD COLUMN position_id INTEGER REFERENCES positions(id);
+
+			CREATE INDEX IF NOT EXISTS idx_lr_position ON learning_resources(position_id);
+		`,
+	},
 ]
 
 /** 幂等执行所有未应用的迁移 */

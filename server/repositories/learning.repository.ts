@@ -83,6 +83,20 @@ export function updatePositionStatus(positionId: number, status: string): void {
 
 // --- 技能 ---
 
+/** 从方向上摘掉一个技能（只解绑，不删技能本身——它可能还挂在别的方向/路径上） */
+export function removePositionSkill(positionId: number, skillId: number): boolean {
+	return getDb()
+		.prepare("DELETE FROM position_skills WHERE position_id = ? AND skill_id = ?")
+		.run(positionId, skillId).changes > 0
+}
+
+/** 只改排序（演进里的 reorder），不动 required_level */
+export function updatePositionSkillOrder(positionId: number, skillId: number, sortOrder: number): void {
+	getDb()
+		.prepare("UPDATE position_skills SET sort_order = ? WHERE position_id = ? AND skill_id = ?")
+		.run(sortOrder, positionId, skillId)
+}
+
 export function findAllSkills(): { id: number, name: string, category: string, parent_id: number | null, level: number, description: string | null }[] {
 	return getDb()
 		.prepare("SELECT * FROM skills ORDER BY category, level, id")
@@ -118,11 +132,12 @@ export function createSkill(input: {
 	category: string
 	level?: number
 	description?: string | null
+	parentId?: number | null
 }): number {
 	return Number(
 		getDb()
-			.prepare("INSERT INTO skills (name, category, level, description) VALUES (?, ?, ?, ?)")
-			.run(input.name, input.category, input.level ?? 1, input.description ?? null)
+			.prepare("INSERT INTO skills (name, category, level, description, parent_id) VALUES (?, ?, ?, ?, ?)")
+			.run(input.name, input.category, input.level ?? 1, input.description ?? null, input.parentId ?? null)
 			.lastInsertRowid,
 	)
 }
@@ -154,10 +169,64 @@ export function findAssessmentByType(type: string): { id: number, type: string, 
 	return (getDb().prepare("SELECT * FROM assessments WHERE type = ?").get(type) as { id: number, type: string, title: string, description: string | null } | undefined) ?? null
 }
 
+/**
+ * 取种子题库（owner_user_id IS NULL）。
+ *
+ * 语义固定为「系统预置题」；用户专属的动态题必须用 findQuestionsByBatch 取，
+ * 两者不能混——此前 analyze 拿种子题去配对动态答案，题目和答案会错位。
+ */
 export function findAssessmentQuestions(assessmentId: number): { id: number, question: string, options: string[], correct_index: number | null, category: string | null, sort_order: number }[] {
 	const rows = getDb()
-		.prepare("SELECT * FROM assessment_questions WHERE assessment_id = ? ORDER BY sort_order")
+		.prepare("SELECT * FROM assessment_questions WHERE assessment_id = ? AND owner_user_id IS NULL ORDER BY sort_order")
 		.all(assessmentId) as { id: number, question: string, options: string, correct_index: number | null, category: string | null, sort_order: number }[]
+	return rows.map((r) => ({ ...r, options: JSON.parse(r.options) as string[] }))
+}
+
+/**
+ * 落库一次动态出题结果。
+ *
+ * 模型出的题此前从不入库，导致分析时只能拿种子题去对答案，
+ * 题数不一致会直接 400，题数碰巧一致则题目与答案错位。
+ * 现在按 batch_id 存一批，分析时原样取回。
+ */
+export function insertDynamicQuestions(input: {
+	assessmentId: number
+	userId: number
+	batchId: string
+	questions: { question: string, options: string[], category?: string }[]
+}): void {
+	const stmt = getDb().prepare(
+		`INSERT INTO assessment_questions
+		 (assessment_id, question, options, correct_index, category, sort_order, owner_user_id, batch_id, source)
+		 VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 'ai')`,
+	)
+	const run = getDb().transaction(() => {
+		input.questions.forEach((q, index) => {
+			stmt.run(
+				input.assessmentId,
+				q.question,
+				JSON.stringify(q.options),
+				q.category ?? null,
+				index,
+				input.userId,
+				input.batchId,
+			)
+		})
+	})
+	run()
+}
+
+/**
+ * 按批次取回某用户的一套动态题。
+ *
+ * 带 owner_user_id 条件，防止拿别人的批次拼答案。
+ */
+export function findQuestionsByBatch(batchId: string, userId: number): { id: number, question: string, options: string[], correct_index: number | null, category: string | null, sort_order: number }[] {
+	const rows = getDb()
+		.prepare(
+			"SELECT * FROM assessment_questions WHERE batch_id = ? AND owner_user_id = ? ORDER BY sort_order",
+		)
+		.all(batchId, userId) as { id: number, question: string, options: string, correct_index: number | null, category: string | null, sort_order: number }[]
 	return rows.map((r) => ({ ...r, options: JSON.parse(r.options) as string[] }))
 }
 
@@ -278,20 +347,49 @@ export function setDailyMinutes(userId: number, dailyMinutes: number): void {
 
 // --- 学习资源 ---
 
-export function findResourcesBySkill(skillId: number): { id: number, title: string, type: string, url: string | null, difficulty: string, description: string | null, duration: number | null }[] {
+export function findResourcesBySkill(skillId: number, positionId?: number): { id: number, title: string, type: string, url: string | null, difficulty: string, description: string | null, duration: number | null }[] {
+	if (positionId !== undefined) {
+		// 优先取当前方向生成的资料，没有再退回旧资料（历史数据无方向标记）
+		return getDb()
+			.prepare(`
+				SELECT id, title, type, url, difficulty, description, duration
+				FROM learning_resources
+				WHERE skill_id = ?
+				ORDER BY (position_id = ?) DESC, id
+			`)
+			.all(skillId, positionId) as { id: number, title: string, type: string, url: string | null, difficulty: string, description: string | null, duration: number | null }[]
+	}
 	return getDb()
 		.prepare("SELECT id, title, type, url, difficulty, description, duration FROM learning_resources WHERE skill_id = ?")
 		.all(skillId) as { id: number, title: string, type: string, url: string | null, difficulty: string, description: string | null, duration: number | null }[]
 }
 
-export function findAllResources(): { id: number, title: string, type: string, url: string | null, skill_id: number | null, difficulty: string, description: string | null, duration: number | null }[] {
+export function findAllResources(): { id: number, title: string, type: string, url: string | null, skill_id: number | null, difficulty: string, description: string | null, duration: number | null, position_id: number | null }[] {
 	return getDb()
-		.prepare("SELECT id, title, type, url, skill_id, difficulty, description, duration FROM learning_resources ORDER BY id")
-		.all() as { id: number, title: string, type: string, url: string | null, skill_id: number | null, difficulty: string, description: string | null, duration: number | null }[]
+		.prepare("SELECT id, title, type, url, skill_id, difficulty, description, duration, position_id FROM learning_resources ORDER BY id")
+		.all() as { id: number, title: string, type: string, url: string | null, skill_id: number | null, difficulty: string, description: string | null, duration: number | null, position_id: number | null }[]
 }
 
-/** 已有正文的资源可直接复用，避免同一技能重复调用模型 */
-export function findReadyResourceBySkill(skillId: number): { id: number, title: string, content: string | null, summary: string | null, objectives: string | null, estimated_minutes: number | null, model: string | null } | null {
+/**
+ * 已有正文的资源可直接复用，避免同一技能重复调用模型。
+ *
+ * 传 positionId 时**只**复用为该方向生成的资料：技能是全局共享的，
+ * 同名技能（如「短篇阅读与信息查找」）可能同时属于韩语和英语方向，
+ * 跨方向复用会把韩语课文挂到英语路径上（v8 之前的真实事故）。
+ * 历史无方向标记（position_id IS NULL）的资料同样不参与复用——
+ * 宁可重新生成，也不赌它语言对不对。
+ */
+export function findReadyResourceBySkill(skillId: number, positionId?: number): { id: number, title: string, content: string | null, summary: string | null, objectives: string | null, estimated_minutes: number | null, model: string | null } | null {
+	if (positionId !== undefined) {
+		return (getDb()
+			.prepare(`
+				SELECT id, title, content, summary, objectives, duration AS estimated_minutes, model
+				FROM learning_resources
+				WHERE skill_id = ? AND position_id = ? AND status = 'ready' AND content IS NOT NULL AND content <> ''
+				ORDER BY id DESC LIMIT 1
+			`)
+			.get(skillId, positionId) as { id: number, title: string, content: string | null, summary: string | null, objectives: string | null, estimated_minutes: number | null, model: string | null } | undefined) ?? null
+	}
 	return (getDb()
 		.prepare(`
 			SELECT id, title, content, summary, objectives, duration AS estimated_minutes, model
@@ -342,7 +440,7 @@ export function findResourceById(resourceId: number): {
 	} | undefined) ?? null
 }
 
-/** 写入模型生成的关卡资料，返回资源 id */
+/** 写入模型生成的关卡资料，返回资源 id；positionId 记录「为哪个方向生成」 */
 export function insertGeneratedResource(input: {
 	skillId: number | null
 	title: string
@@ -352,12 +450,13 @@ export function insertGeneratedResource(input: {
 	difficulty: string
 	estimatedMinutes: number
 	model: string
+	positionId?: number | null
 }): number {
 	return Number(getDb()
 		.prepare(`
 			INSERT INTO learning_resources
-				(title, type, url, skill_id, difficulty, description, duration, content, summary, objectives, source, status, generated_at, model)
-			VALUES (?, 'article', NULL, ?, ?, ?, ?, ?, ?, ?, 'ai', 'ready', datetime('now'), ?)
+				(title, type, url, skill_id, difficulty, description, duration, content, summary, objectives, source, status, generated_at, model, position_id)
+			VALUES (?, 'article', NULL, ?, ?, ?, ?, ?, ?, ?, 'ai', 'ready', datetime('now'), ?, ?)
 		`)
 		.run(
 			input.title,
@@ -369,6 +468,7 @@ export function insertGeneratedResource(input: {
 			input.summary,
 			JSON.stringify(input.objectives),
 			input.model,
+			input.positionId ?? null,
 		).lastInsertRowid)
 }
 
@@ -632,6 +732,12 @@ export function createMasteryCheck(input: {
 		).lastInsertRowid)
 }
 
+export function findMasteryChecksByUser(userId: number, limit = 10): MasteryCheckRow[] {
+	return getDb()
+		.prepare("SELECT * FROM mastery_checks WHERE user_id = ? ORDER BY id DESC LIMIT ?")
+		.all(userId, limit) as MasteryCheckRow[]
+}
+
 export function findMasteryCheckById(checkId: number, userId: number): MasteryCheckRow | null {
 	return (getDb()
 		.prepare("SELECT * FROM mastery_checks WHERE id = ? AND user_id = ?")
@@ -652,6 +758,25 @@ export function updateMasteryCheckAccepted(checkId: number): void {
 	getDb()
 		.prepare("UPDATE mastery_checks SET status = 'accepted', accepted_at = datetime('now') WHERE id = ?")
 		.run(checkId)
+}
+
+/**
+ * 把「已完成但测评判定没掌握」的关卡退回待学状态。
+ *
+ * 没有这一步闭环是断的：moveSkillsToReview 只搬 pending 的关卡，
+ * 而刚被测出没掌握的恰恰是 completed 的那一关——它会被留在原地假装学过了。
+ */
+export function reopenSkillsForReview(pathId: number, skillIds: number[]): number {
+	if (skillIds.length === 0) return 0
+	const db = getDb()
+	const placeholders = skillIds.map(() => "?").join(",")
+	return db
+		.prepare(`
+			UPDATE learning_path_items
+			SET status = 'pending', item_type = 'review', completed_at = NULL
+			WHERE path_id = ? AND skill_id IN (${placeholders}) AND status = 'completed'
+		`)
+		.run(pathId, ...skillIds).changes
 }
 
 /** 把某路径下指定技能的待学关卡移到末尾并标为复习关（只动 pending，in_progress 保持原位） */

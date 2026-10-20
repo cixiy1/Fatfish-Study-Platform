@@ -266,7 +266,7 @@ function extractMessage(error: unknown): string {
 
           <UFormField
             label="最大输出 Token"
-            help="含模型思考消耗；思考型模型（如 deepseek-flash、v4 系列）建议 16384 以上，太小会导致正文为空"
+            help="缺省值：业务侧需要更长正文时会自动申请更高额度，这里只作为兜底。思考型模型（如 deepseek-flash、v4 系列）建议 16384 以上，太小会导致正文为空"
           >
             <UInput
               v-model.number="form.maxTokens"

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import type { DirectionSelectResponse } from "#shared/types/direction"
+import type { GenRow } from "~/components/PlanGeneratingList.vue"
+import { postSse } from "~/composables/useSse"
 
 /**
  * 学习计划引导（多邻国式）：一次只问一件事。
@@ -45,6 +47,11 @@ const {
   restoreDraft,
   clearDraft,
 } = useDirectionInterview()
+
+// 流式生成进度：每个技能点一个固定槽位，模型写完一个就「变形」成真实卡片
+const genRows = ref<GenRow[]>([])
+const genElapsedMs = ref(0)
+const genTimer = ref<number | null>(null)
 
 // 大模型是否可用：SSR 阶段先拿到，避免首屏闪一下访谈再变阻断页
 const { llm, llmReady, llmReasonText, load: loadStatus } = useSystemStatus()
@@ -197,11 +204,7 @@ async function submitFallback() {
   submitting.value = true
   submitError.value = ""
   try {
-    await $fetch("/api/learning-path/generate", {
-      method: "POST",
-      body: { position_id: fallbackPositionId.value, generate_content: true },
-      timeout: 240_000,
-    })
+    await generateWithStream(fallbackPositionId.value)
     await navigateTo("/learning", { replace: true })
   } catch (err) {
     await handleGenerateError(err)
@@ -264,11 +267,7 @@ async function submit() {
       timeout: 30_000,
     })
 
-    await $fetch("/api/learning-path/generate", {
-      method: "POST",
-      body: { position_id: selected.positionId, generate_content: true },
-      timeout: 240_000,
-    })
+    await generateWithStream(selected.positionId)
 
     await $fetch("/api/plan", {
       method: "POST",
@@ -283,6 +282,61 @@ async function submit() {
     await handleGenerateError(err)
   }
 }
+
+/**
+ * 用 SSE 生成路径，边生成边渲染。
+ *
+ * 服务端进入流之后不会再抛 HTTP 错误，失败一律走 error 事件，
+ * 这里把它包装成形似 $fetch 的错误对象，好让既有的 handleGenerateError 分支不动。
+ */
+async function generateWithStream(positionId: number): Promise<void> {
+  genRows.value = []
+  genElapsedMs.value = 0
+  const startedAt = Date.now()
+  genTimer.value = window.setInterval(() => {
+    genElapsedMs.value = Date.now() - startedAt
+  }, 1000)
+
+  try {
+    await postSse("/api/learning-path/generate.stream", { position_id: positionId }, {
+      start: (data) => {
+        genRows.value = (data.items ?? []).map((item: GenRow) => ({
+          skillId: item.skillId,
+          index: item.index,
+          name: item.name,
+          status: "pending",
+        }))
+      },
+      skill_start: (data) => updateRow(data, { status: "writing", attempt: data.attempt }),
+      skill_retry: (data) => updateRow(data, { status: "writing", attempt: data.attempt }),
+      skill_done: (data) => updateRow(data, { status: "ok", material: data.material }),
+      skill_fail: (data) => updateRow(data, { status: "failed", reason: data.reason }),
+      error: (data) => {
+        // 让下面 catch 到，复用原有错误分类逻辑
+        throw Object.assign(new Error(data.message), {
+          statusCode: data.status ?? 500,
+          data: { code: data.code, message: data.message, partial: data.partial },
+        })
+      },
+    })
+  } finally {
+    stopGenTimer()
+  }
+}
+
+function updateRow(data: { skillId: number }, patch: Partial<GenRow>): void {
+  const row = genRows.value.find(r => r.skillId === data.skillId)
+  if (row) Object.assign(row, patch)
+}
+
+function stopGenTimer(): void {
+  if (genTimer.value !== null) {
+    clearInterval(genTimer.value)
+    genTimer.value = null
+  }
+}
+
+onBeforeUnmount(stopGenTimer)
 
 const directionSkillCount = computed(() => {
   const direction = selectedDirection.value
@@ -350,7 +404,15 @@ const directionSkillCount = computed(() => {
         :offline="mock"
         @submit="submit"
       />
-      <AiThinking v-if="submitting" title="正在生成关卡与资料" />
+      <!-- 生成中：按技能点铺好槽位，模型写完一个就就地变成真实卡片 -->
+      <PlanGeneratingList
+        v-if="submitting && genRows.length > 0"
+        class="mt-6"
+        :rows="genRows"
+        :elapsed-ms="genElapsedMs"
+        title="正在生成关卡与资料"
+      />
+      <AiThinking v-else-if="submitting" title="正在准备生成" />
     </div>
 
     <div v-if="!needsLlm && phase === 'position'" class="mt-6">

@@ -2,7 +2,12 @@ import {
 	createAssessmentRecord,
 	findAssessmentByType,
 	findAssessmentQuestions,
+	findQuestionsByBatch,
 	findAllSkills,
+	findSkillsByPosition,
+	findUserProfile,
+	mergeProfileData,
+	parseProfileData,
 	upsertUserProfile,
 	upsertUserSkill,
 } from "../../../repositories/learning.repository"
@@ -10,6 +15,9 @@ import { findUserByAccount } from "../../../repositories/user.repository"
 import { chatStream } from "../../../utils/llm"
 import { requireLlm } from "../../../utils/llm-guard"
 import { readSession } from "../../../utils/session"
+import { openSse } from "../../../utils/sse"
+import { applySkillLinks, mapConclusionToSkills } from "../../../utils/skill-link"
+import type { SkillCandidate, SkillLink } from "../../../utils/skill-link"
 
 /**
  * 测评分析（流式）：POST /api/assessment/:type/analyze
@@ -29,10 +37,6 @@ interface AnalysisResult {
 	weaknesses: string[]
 	recommendation: string
 	suggestedTopics: string[]
-}
-
-function sseWrite(event: string, data: unknown): string {
-	return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
 }
 
 function tryParseAnalysis(text: string): AnalysisResult | null {
@@ -56,27 +60,32 @@ function tryParseAnalysis(text: string): AnalysisResult | null {
 }
 
 /** 根据分析结果联动更新技能状态 */
-function linkSkillsToAssessment(userId: number, result: AnalysisResult): void {
+/**
+ * 兜底联动：字符串子串匹配。
+ *
+ * 只在 LLM 语义映射（mapConclusionToSkills）失败时兜底。
+ * 注意是**单向**包含 + 长度保护：早期版本用双向 includes，
+ * 「学习能力强」这种长句会把名为「学习」的技能误判成已掌握。
+ */
+function linkSkillsByKeyword(userId: number, result: AnalysisResult): void {
 	const allSkills = findAllSkills()
 	const mastered = new Set<string>()
 	const weak = new Set<string>()
 
-	for (const s of result.strengths) {
-		const lower = s.toLowerCase()
+	const match = (text: string, bucket: Set<string>) => {
+		const lower = text.toLowerCase()
 		for (const skill of allSkills) {
-			if (lower.includes(skill.name.toLowerCase()) || skill.name.toLowerCase().includes(lower)) {
-				mastered.add(skill.name)
+			const name = skill.name.toLowerCase()
+			// 只有当「结论短语」不比技能名长太多时才认，避免长句误吞短技能名
+			if (lower.length > name.length + 2) continue
+			if (lower.includes(name) || name.includes(lower)) {
+				bucket.add(skill.name)
 			}
 		}
 	}
-	for (const w of result.weaknesses) {
-		const lower = w.toLowerCase()
-		for (const skill of allSkills) {
-			if (lower.includes(skill.name.toLowerCase()) || skill.name.toLowerCase().includes(lower)) {
-				weak.add(skill.name)
-			}
-		}
-	}
+
+	for (const s of result.strengths) match(s, mastered)
+	for (const w of result.weaknesses) match(w, weak)
 
 	for (const skill of allSkills) {
 		if (mastered.has(skill.name)) {
@@ -84,6 +93,58 @@ function linkSkillsToAssessment(userId: number, result: AnalysisResult): void {
 		} else if (weak.has(skill.name)) {
 			upsertUserSkill(userId, skill.id, "not_started", skill.level)
 		}
+	}
+}
+
+/**
+ * 把测评结论映射到技能图谱。
+ *
+ * 候选集取「用户已选方向的技能」，没有方向时退回已有技能，上限 12 个，
+ * 避免把全站技能都塞进 prompt（技能库是动态且跨领域的，会撑爆 prompt）。
+ */
+async function linkSkillsFromConclusion(
+	userId: number,
+	result: AnalysisResult,
+): Promise<SkillLink[]> {
+	try {
+		const profile = findUserProfile(userId)
+		const profileData = parseProfileData(profile?.profile_data ?? null)
+		const positionId = (profileData.aiDirection as { positionId?: number } | undefined)?.positionId
+
+		const candidates: SkillCandidate[] = positionId
+			? findSkillsByPosition(positionId).map((skill) => ({
+					id: skill.id,
+					name: skill.name,
+					description: skill.description ?? null,
+					level: skill.level,
+				}))
+			: findAllSkills().slice(0, 12).map((skill) => ({
+					id: skill.id,
+					name: skill.name,
+					description: skill.description ?? null,
+					level: skill.level,
+				}))
+
+		if (candidates.length === 0) return []
+
+		const links = await mapConclusionToSkills({
+			strengths: result.strengths,
+			weaknesses: result.weaknesses,
+			suggestedTopics: result.suggestedTopics,
+			recommendation: result.recommendation,
+			candidates,
+		})
+
+		if (links.length === 0) return []
+
+		const levelById = new Map(candidates.map((skill) => [skill.id, skill.level]))
+		applySkillLinks(userId, links, levelById)
+		console.info(`[assessment] 联动技能图谱 user=${userId} 命中 ${links.length} 项`)
+		return links
+	} catch (error) {
+		// 联动只是增益，失败不影响测评结论本身
+		console.warn("[assessment] 技能联动失败", error instanceof Error ? error.message : error)
+		return []
 	}
 }
 
@@ -100,9 +161,20 @@ export default defineEventHandler(async (event) => {
 
 	requireLlm()
 
-	const body = await readBody<{ answers?: number[] }>(event).catch(() => null)
+	const body = await readBody<{ answers?: number[], batchId?: string }>(event).catch(() => null)
 	const answers = body?.answers ?? []
-	const questions = findAssessmentQuestions(assessment.id)
+
+	// 优先按 batchId 取「当时真正展示给用户的那套动态题」；
+	// 没传（旧前端/种子题场景）才退回种子题库。
+	// 此前一律读种子题：模型出 6~8 题时要么数量对不上直接 400，
+	// 要么数量碰巧一致但「DB 第 i 题 + 前端第 i 个答案」错位，结论不可信。
+	const questions = body?.batchId
+		? findQuestionsByBatch(body.batchId, user.id)
+		: findAssessmentQuestions(assessment.id)
+
+	if (questions.length === 0) {
+		throw createError({ statusCode: 400, message: "测评题目不存在，请重新生成" })
+	}
 
 	if (answers.length !== questions.length) {
 		throw createError({ statusCode: 400, message: "答题数量不匹配" })
@@ -150,23 +222,20 @@ export default defineEventHandler(async (event) => {
 		},
 	]
 
-	setResponseHeader(event, "Content-Type", "text/event-stream")
-	setResponseHeader(event, "Cache-Control", "no-cache")
-	setResponseHeader(event, "Connection", "keep-alive")
-
-	const res = event.node.res
+	const sse = openSse(event)
 	let fullText = ""
 
 	try {
 		for await (const chunk of chatStream({
 			messages,
 			temperature: 0.4,
-			maxTokens: 4096,
+			maxTokens: 8192,
 			timeoutMs: 60_000,
 			tag: `assessment-stream:${user.id}`,
+			signal: sse.signal,
 		})) {
 			fullText += chunk
-			res.write(sseWrite("chunk", { text: chunk }))
+			sse.write("chunk", { text: chunk })
 		}
 
 		const parsed = tryParseAnalysis(fullText)
@@ -181,23 +250,39 @@ export default defineEventHandler(async (event) => {
 			)
 
 			if (type === "career") {
+				// 注意：profile_data 必须走 merge，不能整体覆盖——
+				// 否则会把 dailyMinutes / aiDirection 这些既有键冲掉
 				upsertUserProfile(user.id, {
 					assessment_completed: 1,
 					career_direction: parsed.careerDirection,
-					profile_data: JSON.stringify(parsed),
+				})
+				mergeProfileData(user.id, {
+					lastAssessment: { ...parsed, at: new Date().toISOString() },
+					suggestedTopics: parsed.suggestedTopics,
 				})
 			}
 
-			linkSkillsToAssessment(user.id, parsed)
+			// 测评结论 → 技能图谱：优先让模型做语义映射，失败再退化为关键词匹配
+			const linked = await linkSkillsFromConclusion(user.id, parsed)
+			if (linked.length === 0) {
+				linkSkillsByKeyword(user.id, parsed)
+			}
 
-			res.write(sseWrite("done", {
+			// 结果页要能直接跳到本人方向的图谱页
+			const resultProfile = findUserProfile(user.id)
+			const resultProfileData = parseProfileData(resultProfile?.profile_data ?? null)
+			const positionId = (resultProfileData.aiDirection as { positionId?: number } | undefined)?.positionId ?? null
+
+			sse.write("done", {
 				score: answeredCount,
 				total: questions.length,
 				result: parsed,
 				aiGenerated: true,
-			}))
+				linked,
+				positionId,
+			})
 		} else {
-			res.write(sseWrite("done", {
+			sse.write("done", {
 				score: answeredCount,
 				total: questions.length,
 				result: {
@@ -209,13 +294,13 @@ export default defineEventHandler(async (event) => {
 				},
 				aiGenerated: false,
 				rawText: fullText.slice(0, 1000),
-			}))
+			})
 		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "分析失败"
 		console.warn(`[assessment] stream failed user=${user.id} error=${message}`)
-		res.write(sseWrite("error", { message }))
+		sse.write("error", { message })
 	} finally {
-		res.end()
+		sse.close()
 	}
 })

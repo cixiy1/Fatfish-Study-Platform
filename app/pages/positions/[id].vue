@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { postSse } from "~/composables/useSse"
 
 useHead({ title: "技能图谱 · FSP" })
 
@@ -12,6 +13,15 @@ interface Skill {
   required_level: number
 }
 
+interface EvolveResult {
+  applied: boolean
+  summary: string
+  added: { skillId: number, name: string }[]
+  releveled: { skillId: number, name: string, requiredLevel: number }[]
+  reordered: number
+  pruned: { skillId: number, name: string }[]
+}
+
 const route = useRoute()
 const loading = ref(true)
 const position = ref<{ id: number, name: string, category: string, description: string | null } | null>(null)
@@ -22,6 +32,13 @@ const updating = ref<number | null>(null)
 const analyzing = ref(false)
 const streamText = ref("")
 const analysisResult = ref<{ summary: string, recommendations: { skillName: string, status: string, reason: string }[] } | null>(null)
+const analyzeError = ref<string | null>(null)
+
+// 图谱演进：模型先给结构化 diff（proposal），落库后再回传实际改动（done）
+const evolving = ref(false)
+const evolveText = ref("")
+const evolveResult = ref<EvolveResult | null>(null)
+const evolveError = ref<string | null>(null)
 
 async function loadData() {
   loading.value = true
@@ -39,7 +56,13 @@ async function loadData() {
   }
 }
 
-onMounted(loadData)
+onMounted(async () => {
+  await loadData()
+  // 从测评结果页带过来的：直接替用户点一次 AI 分析，把测评结论落回图谱
+  if (route.query.autoAnalyze === "1") {
+    await aiAnalyze()
+  }
+})
 
 async function toggleSkill(skill: Skill, status: string) {
   updating.value = skill.id
@@ -64,62 +87,62 @@ async function aiAnalyze() {
   analysisResult.value = null
 
   try {
-    const response = await fetch(`/api/positions/${route.params.id}/analyze`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    })
-
-    if (!response.ok || !response.body) {
-      throw new Error(`请求失败: ${response.status}`)
-    }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ""
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      const blocks = buffer.split("\n\n")
-      buffer = blocks.pop() ?? ""
-
-      for (const block of blocks) {
-        const eventMatch = block.match(/^event: (.+)$/m)
-        const dataMatch = block.match(/^data: (.+)$/m)
-        if (!eventMatch || !dataMatch) continue
-
-        const eventType = eventMatch[1]
-        const data = JSON.parse(dataMatch[1])
-
-        if (eventType === "chunk") {
-          streamText.value += data.text
-        } else if (eventType === "done") {
-          analysisResult.value = data.analysis
-          if (data.updated) {
-            await loadData()
-          }
-        } else if (eventType === "error") {
-          throw new Error(data.message)
+    await postSse(`/api/positions/${route.params.id}/analyze`, {}, {
+      chunk: (data) => { streamText.value += data.text },
+      done: async (data) => {
+        analysisResult.value = data.analysis
+        if (data.updated) {
+          await loadData()
         }
-      }
-    }
-  } catch {
-    // 忽略
+      },
+      error: (data) => {
+        analyzeError.value = data.message ?? "分析失败"
+      },
+    })
+  } catch (e) {
+    analyzeError.value = e instanceof Error ? e.message : "分析失败"
   } finally {
     analyzing.value = false
   }
 }
 
-const streamingDisplay = computed(() => {
-  const text = streamText.value
+/** 流式面板只显示模型的自然语言部分，JSON 块不展示给用户 */
+function stripJsonBlock(text: string) {
   const jsonStart = text.indexOf("```json")
   if (jsonStart >= 0) return text.slice(0, jsonStart).trim()
   const braceStart = text.indexOf("{")
   if (braceStart >= 0) return text.slice(0, braceStart).trim()
   return text.trim()
-})
+}
+
+const streamingDisplay = computed(() => stripJsonBlock(streamText.value))
+const evolveDisplay = computed(() => stripJsonBlock(evolveText.value))
+
+async function aiEvolve() {
+  evolving.value = true
+  evolveText.value = ""
+  evolveResult.value = null
+  evolveError.value = null
+
+  try {
+    await postSse(`/api/positions/${route.params.id}/evolve.stream`, {}, {
+      chunk: (data) => { evolveText.value += data.text ?? "" },
+      done: async (data) => {
+        evolveResult.value = data as EvolveResult
+        if (data.applied) {
+          await loadData()
+        }
+      },
+      error: (data) => {
+        evolveError.value = data.message ?? "演进失败"
+      },
+    })
+  } catch (e) {
+    evolveError.value = e instanceof Error ? e.message : "演进失败"
+  } finally {
+    evolving.value = false
+  }
+}
 
 const statusColor = (skillId: number) => {
   const s = userSkillMap.value.get(skillId)
@@ -140,15 +163,25 @@ const statusLabel = (skillId: number) => {
         <h1 class="text-2xl font-semibold tracking-tight">{{ position?.name }}</h1>
         <p class="mt-1 text-sm text-muted">{{ position?.description }}</p>
       </div>
-      <UButton
-        v-if="!loading && skills.length > 0"
-        icon="i-lucide-sparkles"
-        color="primary"
-        variant="soft"
-        :loading="analyzing"
-        label="AI 分析"
-        @click="aiAnalyze"
-      />
+      <div v-if="!loading && skills.length > 0" class="flex items-center gap-2">
+        <UButton
+          icon="i-lucide-sparkles"
+          color="primary"
+          variant="soft"
+          :loading="analyzing"
+          :disabled="evolving"
+          label="AI 分析"
+          @click="aiAnalyze"
+        />
+        <UButton
+          icon="i-lucide-git-branch-plus"
+          color="primary"
+          :loading="evolving"
+          :disabled="analyzing"
+          label="AI 演进图谱"
+          @click="aiEvolve"
+        />
+      </div>
     </div>
 
     <div v-if="loading" class="py-20 text-center text-muted">加载中…</div>
@@ -164,6 +197,16 @@ const statusLabel = (skillId: number) => {
           {{ streamingDisplay }}<span class="animate-pulse text-primary">▌</span>
         </div>
       </div>
+
+      <!-- 分析失败：以前是被 catch{} 静默吞掉的，现在至少让用户知道原因 -->
+      <UAlert
+        v-if="analyzeError && !analyzing"
+        color="error"
+        variant="soft"
+        title="AI 分析失败"
+        :description="analyzeError"
+        class="mb-6"
+      />
 
       <!-- AI 分析结果 -->
       <div v-if="analysisResult && !analyzing" class="mb-6 rounded-xl border border-default p-5">
@@ -188,6 +231,80 @@ const statusLabel = (skillId: number) => {
             <span class="text-muted">{{ rec.reason }}</span>
           </div>
         </div>
+      </div>
+
+      <!-- 图谱演进：流式 -->
+      <div v-if="evolving" class="mb-6 rounded-xl border border-primary/30 bg-primary/5 p-5">
+        <div class="mb-3 flex items-center gap-2">
+          <div class="size-2 animate-pulse rounded-full bg-primary" />
+          <span class="text-sm font-medium">大模型正在演进技能图谱…</span>
+        </div>
+        <div v-if="evolveDisplay" class="whitespace-pre-wrap text-sm leading-relaxed text-muted">
+          {{ evolveDisplay }}<span class="animate-pulse text-primary">▌</span>
+        </div>
+        <div v-else class="space-y-2">
+          <USkeleton class="h-4 w-3/4" />
+          <USkeleton class="h-4 w-1/2" />
+        </div>
+      </div>
+
+      <UAlert
+        v-if="evolveError && !evolving"
+        color="error"
+        variant="soft"
+        title="图谱演进失败"
+        :description="evolveError"
+        class="mb-6"
+      />
+
+      <!-- 演进结果 -->
+      <div v-if="evolveResult && !evolving" class="mb-6 rounded-xl border border-default p-5">
+        <div class="mb-3 flex items-center gap-2">
+          <UIcon name="i-lucide-git-branch-plus" class="text-primary" />
+          <span class="font-medium">图谱演进结果</span>
+          <UBadge :color="evolveResult.applied ? 'success' : 'neutral'" variant="soft" size="sm">
+            {{ evolveResult.applied ? "已应用到图谱" : "未改动" }}
+          </UBadge>
+        </div>
+        <p v-if="evolveResult.summary" class="text-sm text-muted">{{ evolveResult.summary }}</p>
+
+        <div v-if="evolveResult.added.length > 0" class="mt-4">
+          <p class="mb-2 text-xs text-muted">新增 {{ evolveResult.added.length }} 个节点</p>
+          <div class="flex flex-wrap gap-2">
+            <UBadge v-for="item in evolveResult.added" :key="item.skillId" color="success" variant="soft" size="sm">
+              + {{ item.name }}
+            </UBadge>
+          </div>
+        </div>
+
+        <div v-if="evolveResult.releveled.length > 0" class="mt-4">
+          <p class="mb-2 text-xs text-muted">调整 {{ evolveResult.releveled.length }} 个节点的要求等级</p>
+          <div class="flex flex-wrap gap-2">
+            <UBadge v-for="item in evolveResult.releveled" :key="item.skillId" color="warning" variant="soft" size="sm">
+              {{ item.name }} → L{{ item.requiredLevel }}
+            </UBadge>
+          </div>
+        </div>
+
+        <div v-if="evolveResult.pruned.length > 0" class="mt-4">
+          <p class="mb-2 text-xs text-muted">移除 {{ evolveResult.pruned.length }} 个无关节点</p>
+          <div class="flex flex-wrap gap-2">
+            <UBadge v-for="item in evolveResult.pruned" :key="item.skillId" color="error" variant="soft" size="sm">
+              − {{ item.name }}
+            </UBadge>
+          </div>
+        </div>
+
+        <p v-if="evolveResult.reordered > 0" class="mt-4 text-xs text-muted">
+          已按模型建议重排 {{ evolveResult.reordered }} 个节点的学习顺序
+        </p>
+
+        <p
+          v-if="evolveResult.applied && evolveResult.added.length + evolveResult.releveled.length + evolveResult.pruned.length + evolveResult.reordered === 0"
+          class="mt-3 text-sm text-muted"
+        >
+          模型认为当前图谱已经合理，没有提出改动。
+        </p>
       </div>
 
       <!-- 技能列表 -->

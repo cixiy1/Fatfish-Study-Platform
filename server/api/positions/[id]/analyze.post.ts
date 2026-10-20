@@ -11,6 +11,7 @@ import { findUserByAccount } from "../../../repositories/user.repository"
 import { chatStream } from "../../../utils/llm"
 import { requireLlm } from "../../../utils/llm-guard"
 import { readSession } from "../../../utils/session"
+import { openSse } from "../../../utils/sse"
 
 /**
  * 技能图谱分析（流式）：POST /api/positions/:id/analyze
@@ -23,10 +24,6 @@ import { readSession } from "../../../utils/session"
 interface SkillAnalysis {
 	recommendations: { skillName: string, status: string, reason: string }[]
 	summary: string
-}
-
-function sseWrite(event: string, data: unknown): string {
-	return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
 }
 
 function tryParseSkillAnalysis(text: string): SkillAnalysis | null {
@@ -118,11 +115,7 @@ export default defineEventHandler(async (event) => {
 		},
 	]
 
-	setResponseHeader(event, "Content-Type", "text/event-stream")
-	setResponseHeader(event, "Cache-Control", "no-cache")
-	setResponseHeader(event, "Connection", "keep-alive")
-
-	const res = event.node.res
+	const sse = openSse(event)
 	let fullText = ""
 
 	try {
@@ -132,9 +125,10 @@ export default defineEventHandler(async (event) => {
 			maxTokens: 4096,
 			timeoutMs: 60_000,
 			tag: `skill-analyze:${user.id}:${positionId}`,
+			signal: sse.signal,
 		})) {
 			fullText += chunk
-			res.write(sseWrite("chunk", { text: chunk }))
+			sse.write("chunk", { text: chunk })
 		}
 
 		const parsed = tryParseSkillAnalysis(fullText)
@@ -147,21 +141,21 @@ export default defineEventHandler(async (event) => {
 					upsertUserSkill(user.id, skill.id, rec.status, skill.required_level)
 				}
 			}
-			res.write(sseWrite("done", { analysis: parsed, updated: true }))
+			sse.write("done", { analysis: parsed, updated: true })
 		} else {
-			res.write(sseWrite("done", {
+			sse.write("done", {
 				analysis: {
 					summary: fullText.replace(/```json[\s\S]*?```/g, "").trim().slice(0, 400) || "分析完成",
 					recommendations: [],
 				},
 				updated: false,
-			}))
+			})
 		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "分析失败"
 		console.warn(`[skill-map] analyze failed user=${user.id} pos=${positionId} error=${message}`)
-		res.write(sseWrite("error", { message }))
+		sse.write("error", { message })
 	} finally {
-		res.end()
+		sse.close()
 	}
 })

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 
+import { postSse } from "~/composables/useSse"
+
 useHead({ title: "智能答疑 · FSP" })
 
 interface QARecord {
@@ -9,11 +11,18 @@ interface QARecord {
   created_at: string
 }
 
+interface QaReference {
+  skills: { id: number, name: string }[]
+  resources: { id: number, title: string }[]
+  lesson: string | null
+}
+
 const loading = ref(true)
 const asking = ref(false)
 const history = ref<QARecord[]>([])
 const question = ref("")
-const currentAnswer = ref<{ question: string, answer: string } | null>(null)
+const currentAnswer = ref<{ question: string, answer: string, references?: QaReference } | null>(null)
+const askError = ref<string | null>(null)
 
 /** 答案是 Markdown，渲染成 HTML；renderMarkdown 先转义再拼标签，可安全 v-html */
 function answerHtml(answer: string | null) {
@@ -36,20 +45,36 @@ async function loadHistory() {
 onMounted(loadHistory)
 
 async function ask() {
-  if (!question.value.trim()) return
+  const text = question.value.trim()
+  if (!text) return
+
   asking.value = true
-  currentAnswer.value = null
+  askError.value = null
+  // 先占位，模型第一帧到达前用户就能看到「正在回答的是哪个问题」
+  currentAnswer.value = { question: text, answer: "" }
+
   try {
-    currentAnswer.value = await $fetch<{ question: string, answer: string }>("/api/qa", {
-      method: "POST",
-      body: { question: question.value },
+    await postSse("/api/qa/stream", { question: text }, {
+      chunk: (data) => {
+        if (currentAnswer.value) currentAnswer.value.answer += data.text ?? ""
+      },
+      done: async (data) => {
+        currentAnswer.value = {
+          question: data.question ?? text,
+          answer: data.answer ?? "",
+          references: data.references,
+        }
+        question.value = ""
+        await loadHistory()
+      },
+      error: (data) => {
+        askError.value = data.message ?? "答疑失败"
+        currentAnswer.value = null
+      },
     })
-    question.value = ""
-    await loadHistory()
-  } catch {
-
-    // 忽略
-
+  } catch (e) {
+    askError.value = e instanceof Error ? e.message : "答疑失败"
+    currentAnswer.value = null
   } finally {
     asking.value = false
   }
@@ -77,10 +102,50 @@ async function ask() {
       </div>
     </UCard>
 
-    <!-- 当前回答 -->
+    <UAlert
+      v-if="askError"
+      color="error"
+      variant="soft"
+      title="答疑失败"
+      :description="askError"
+      class="mb-6"
+    />
+
+    <!-- 当前回答：流式边生成边渲染 -->
     <UCard v-if="currentAnswer" class="mb-6">
       <div class="mb-3 font-medium">{{ currentAnswer.question }}</div>
-      <div class="qa-answer text-sm text-muted" v-html="answerHtml(currentAnswer.answer)" />
+      <div v-if="currentAnswer.answer" class="qa-answer text-sm text-muted" v-html="answerHtml(currentAnswer.answer)" />
+      <div v-else class="space-y-2">
+        <USkeleton class="h-4 w-11/12" />
+        <USkeleton class="h-4 w-4/5" />
+        <USkeleton class="h-4 w-2/3" />
+      </div>
+      <div v-if="asking" class="mt-2 animate-pulse text-xs text-primary">正在生成…</div>
+
+      <div v-if="currentAnswer.references" class="mt-4 flex flex-wrap items-center gap-2 border-t border-default pt-3">
+        <span class="text-xs text-muted">引用来源：</span>
+        <UBadge
+          v-for="item in currentAnswer.references.skills"
+          :key="`s-${item.id}`"
+          color="info"
+          variant="soft"
+          size="sm"
+        >
+          {{ item.name }}
+        </UBadge>
+        <UBadge
+          v-for="item in currentAnswer.references.resources"
+          :key="`r-${item.id}`"
+          color="neutral"
+          variant="soft"
+          size="sm"
+        >
+          {{ item.title }}
+        </UBadge>
+        <UBadge v-if="currentAnswer.references.lesson" color="warning" variant="soft" size="sm">
+          当前关卡：{{ currentAnswer.references.lesson }}
+        </UBadge>
+      </div>
     </UCard>
 
     <!-- 历史 -->

@@ -71,7 +71,7 @@ export class LlmNotConfiguredError extends Error {
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000
-const DEFAULT_MAX_TOKENS = 4096
+const DEFAULT_MAX_TOKENS = 8192
 /**
  * 输出 token 下限。
  *
@@ -82,7 +82,29 @@ const DEFAULT_MAX_TOKENS = 4096
  * 所以这里给一个下限，业务传小了也会被抬到这个值（max_tokens 只是上限，不按量计费）。
  */
 const MIN_OUTPUT_TOKENS = 4096
+/**
+ * 输出 token 的失控保护上限。
+ *
+ * 后台配置的 maxTokens 只是「缺省值」而不是硬上限（见 resolveMaxTokens）：
+ * 业务侧按实际需要申请更大的额度时必须放行，否则写两篇 500~800 字的微课
+ * 会被钳到 4096 而必然截断。这里只防「业务侧写错成 100 万」这种失控。
+ */
+const HARD_CEILING_TOKENS = 32_768
 const ANTHROPIC_VERSION = "2023-06-01"
+
+/**
+ * 计算本次请求真正生效的 max_tokens。
+ *
+ * 语义（重要）：后台配置是**缺省值**，业务侧的显式请求优先。
+ * 旧实现是 `min(业务值, 后台值)`，等于把后台配置当硬上限——
+ * plan-generator 申请 12000 会被钳到 4096，必然触发 LlmTruncatedError，
+ * 这是「学习计划生成失败」的根因。max_tokens 只是上限、不按量计费，钳死没有收益。
+ */
+export function resolveMaxTokens(configured: number | undefined, requested: number | undefined): number {
+	const fallback = configured && configured > 0 ? configured : DEFAULT_MAX_TOKENS
+	const wanted = Math.max(requested ?? fallback, MIN_OUTPUT_TOKENS)
+	return Math.min(wanted, HARD_CEILING_TOKENS)
+}
 
 /** 模型输出被 max_tokens 截断（通常是思考型模型把额度用在了推理上） */
 export class LlmTruncatedError extends Error {
@@ -170,11 +192,8 @@ function buildRequest(
 ): LlmRequest {
 	const anthropic = isAnthropicFormat(config)
 	const endpoint = resolveEndpoint(config.baseUrl, anthropic ? "/messages" : "/chat/completions")
-	// 上限取「后台配置」与「业务请求」的较小值，但不低于 MIN_OUTPUT_TOKENS：
-	// 思考型模型的推理 token 也算在 max_tokens 里，给太小等于必然空输出
-	const ceiling = config.maxTokens || DEFAULT_MAX_TOKENS
-	const requested = Math.max(options.maxTokens ?? DEFAULT_MAX_TOKENS, MIN_OUTPUT_TOKENS)
-	const maxTokens = Math.max(1, Math.min(requested, ceiling))
+	// 后台配置是缺省值，业务侧的显式请求优先（详见 resolveMaxTokens 的说明）
+	const maxTokens = resolveMaxTokens(config.maxTokens, options.maxTokens)
 	const temperature = options.temperature ?? 0.4
 
 	const systemMessage = messages.find((message) => message.role === "system")?.content ?? ""
@@ -438,8 +457,40 @@ export interface ChatStreamOptions {
 	messages: LlmMessage[]
 	temperature?: number
 	maxTokens?: number
+	/**
+	 * 空闲超时（毫秒）：自上次收到数据起重新计时。
+	 *
+	 * 注意这里**不是**整段流的墙钟上限——思考型模型可能 20~30s 后才吐第一个字，
+	 * 用墙钟会把正常的长请求误杀。旧实现的语义是墙钟，已改。
+	 */
 	timeoutMs?: number
 	tag?: string
+	/** 上游取消信号（如客户端断开 SSE），中止后不再继续消耗模型额度 */
+	signal?: AbortSignal
+}
+
+/** 流式调用结束后的元信息 */
+export interface ChatStreamMeta {
+	text: string
+	model: string
+	/** 输出是否因达到 max_tokens 而被截断 */
+	truncated: boolean
+	finishReason: string | null
+	durationMs: number
+}
+
+/** 把业务信号与内部超时信号合并（Node 18 没有 AbortSignal.any） */
+function combineSignals(signals: (AbortSignal | undefined)[]): AbortSignal {
+	const controller = new AbortController()
+	for (const signal of signals) {
+		if (!signal) continue
+		if (signal.aborted) {
+			controller.abort()
+			break
+		}
+		signal.addEventListener("abort", () => controller.abort(), { once: true })
+	}
+	return controller.signal
 }
 
 /**
@@ -447,10 +498,12 @@ export interface ChatStreamOptions {
  *
  * 用 native fetch 拿 ReadableStream，按 SSE 协议解析 delta。
  * OpenAI 和 Anthropic 两种格式都支持。
+ * 生成器返回值是 ChatStreamMeta（含是否截断），对只做 `for await` 的调用方无影响。
  */
-export async function* chatStream(options: ChatStreamOptions): AsyncGenerator<string> {
+export async function* chatStream(options: ChatStreamOptions): AsyncGenerator<string, ChatStreamMeta> {
 	const tag = options.tag ?? "stream"
 	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+	const startedAt = Date.now()
 
 	const rawSetting = getSetting("llm")
 	const config = getLlmConfig()
@@ -465,11 +518,12 @@ export async function* chatStream(options: ChatStreamOptions): AsyncGenerator<st
 	})
 	const body = { ...request.body, stream: true }
 
+	// 建连阶段用整段超时（避免连不上时无限挂起），之后交给流内的空闲超时
 	const response = await fetch(request.endpoint, {
 		method: "POST",
 		headers: request.headers,
 		body: JSON.stringify(body),
-		signal: AbortSignal.timeout(timeoutMs),
+		signal: combineSignals([options.signal, AbortSignal.timeout(timeoutMs)]),
 	})
 
 	if (!response.ok || !response.body) {
@@ -480,10 +534,30 @@ export async function* chatStream(options: ChatStreamOptions): AsyncGenerator<st
 	const reader = response.body.getReader()
 	const decoder = new TextDecoder()
 	let buffer = ""
+	let fullText = ""
+	let finishReason: string | null = null
 
 	try {
 		while (true) {
-			const { done, value } = await reader.read()
+			// 每次读取单独计时，收到数据就重置：长流不会被固定墙钟误杀
+			let idleHandle: ReturnType<typeof setTimeout> | undefined
+			let idleReject: ((reason: Error) => void) | undefined
+			const idle = new Promise<never>((_, reject) => {
+				idleReject = reject
+				idleHandle = setTimeout(() => {
+					reject(new Error(`大模型流式响应空闲超过 ${Math.round(timeoutMs / 1000)}s`))
+				}, timeoutMs)
+			})
+
+			let result: ReadableStreamReadResult<Uint8Array>
+			try {
+				result = await Promise.race([reader.read(), idle, abortPromise(options.signal)])
+			} finally {
+				if (idleHandle) clearTimeout(idleHandle)
+				idleReject = undefined
+			}
+
+			const { done, value } = result
 			if (done) break
 
 			buffer += decoder.decode(value, { stream: true })
@@ -495,24 +569,69 @@ export async function* chatStream(options: ChatStreamOptions): AsyncGenerator<st
 				if (!trimmed || !trimmed.startsWith("data:")) continue
 
 				const data = trimmed.slice(5).trim()
-				if (data === "[DONE]") return
+				if (data === "[DONE]") break
 
 				try {
 					const parsed = JSON.parse(data) as Record<string, unknown>
+					const reason = request.anthropic
+						? extractAnthropicFinishReason(parsed)
+						: extractOpenAiFinishReason(parsed)
+					if (reason) finishReason = reason
+
 					const delta = request.anthropic
 						? extractAnthropicDelta(parsed)
 						: extractOpenAiDelta(parsed)
-					if (delta) yield delta
+					if (delta) {
+						fullText += delta
+						yield delta
+					}
 				} catch {
 					// JSON 解析失败的单行跳过，SSE 可能有不完整片段
 				}
 			}
 		}
 	} finally {
+		// 异常或提前 return 时也要真正关掉上游连接，否则长连接泄漏
+		try {
+			await reader.cancel()
+		} catch {
+			// 已读完或已断开
+		}
 		reader.releaseLock()
 	}
 
-	console.info(`[llm] ${tag} stream done protocol=${request.anthropic ? "anthropic" : "openai"} model=${config.model}`)
+	const meta: ChatStreamMeta = {
+		text: fullText,
+		model: config.model,
+		truncated: isTruncated(finishReason),
+		finishReason,
+		durationMs: Date.now() - startedAt,
+	}
+	console.info(
+		`[llm] ${tag} stream done protocol=${request.anthropic ? "anthropic" : "openai"} model=${config.model}`
+		+ ` chars=${fullText.length} finish=${finishReason ?? "-"} truncated=${meta.truncated}`,
+	)
+	return meta
+}
+
+/** 把已中止/外部中止的 signal 转成一个会 reject 的 promise */
+function abortPromise(signal?: AbortSignal): Promise<never> {
+	if (!signal) return new Promise(() => {})
+	if (signal.aborted) return Promise.reject(new Error("ABORTED"))
+	return new Promise((_, reject) => {
+		signal.addEventListener("abort", () => reject(new Error("ABORTED")), { once: true })
+	})
+}
+
+function extractOpenAiFinishReason(parsed: Record<string, unknown>): string | null {
+	const choices = parsed.choices as { finish_reason?: string | null }[] | undefined
+	return choices?.[0]?.finish_reason ?? null
+}
+
+function extractAnthropicFinishReason(parsed: Record<string, unknown>): string | null {
+	// Anthropic 的 message_delta 事件里带 delta.stop_reason
+	const delta = parsed.delta as { stop_reason?: string | null } | undefined
+	return delta?.stop_reason ?? null
 }
 
 function extractOpenAiDelta(parsed: Record<string, unknown>): string | null {

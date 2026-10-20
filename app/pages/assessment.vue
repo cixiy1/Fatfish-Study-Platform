@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { postSse } from "~/composables/useSse"
 
 useHead({ title: "能力测评 · FSP" })
 
@@ -27,7 +28,14 @@ const result = ref<{
     suggestedTopics: string[]
   }
   aiGenerated: boolean
+  /** 已联动写入技能图谱的技能 */
+  linked?: { skillId: number, name: string, status: string }[]
+  /** 用户已选方向的 id，用于结果页直接跳转 */
+  positionId?: number | null
 } | null>(null)
+
+/** 本次动态出题的批次号，提交时要回传，服务端才能取回当时这套题 */
+const batchId = ref<string | null>(null)
 
 const errorMsg = ref("")
 
@@ -47,52 +55,19 @@ const streamDisplay = computed(() => {
   return text.trim()
 })
 
-async function consumeSse(
-  response: Response,
-  onChunk: (text: string) => void,
-  onDone: (data: Record<string, unknown>) => void,
-  onError: (msg: string) => void,
-) {
-  if (!response.ok || !response.body) throw new Error(`请求失败: ${response.status}`)
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ""
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const blocks = buffer.split("\n\n")
-    buffer = blocks.pop() ?? ""
-    for (const block of blocks) {
-      const eventMatch = block.match(/^event: (.+)$/m)
-      const dataMatch = block.match(/^data: (.+)$/m)
-      if (!eventMatch || !dataMatch) continue
-      const eventType = eventMatch[1]
-      const data = JSON.parse(dataMatch[1])
-      if (eventType === "chunk") onChunk(data.text)
-      else if (eventType === "done") onDone(data)
-      else if (eventType === "error") onError(data.message)
-    }
-  }
-}
-
 async function generateQuestions() {
   phase.value = "generating"
   streamText.value = ""
   errorMsg.value = ""
 
   try {
-    const response = await fetch("/api/assessment/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    })
-    await consumeSse(
-      response,
-      (text) => { streamText.value += text },
-      (data) => {
+    await postSse("/api/assessment/generate", {}, {
+      chunk: (data) => { streamText.value += data.text },
+      done: (data) => {
         const qs = data.questions as Question[]
         if (Array.isArray(qs) && qs.length >= 3) {
           questions.value = qs
+          batchId.value = data.batchId ?? null
           answers.value = new Array(qs.length).fill(-1)
           currentStep.value = 0
           phase.value = "quiz"
@@ -101,8 +76,8 @@ async function generateQuestions() {
           phase.value = "error"
         }
       },
-      (msg) => { errorMsg.value = msg; phase.value = "error" },
-    )
+      error: (data) => { errorMsg.value = data.message; phase.value = "error" },
+    })
   } catch (e) {
     errorMsg.value = e instanceof Error ? e.message : "出题失败"
     phase.value = "error"
@@ -115,20 +90,14 @@ async function submit() {
   errorMsg.value = ""
 
   try {
-    const response = await fetch("/api/assessment/career/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ answers: answers.value }),
-    })
-    await consumeSse(
-      response,
-      (text) => { streamText.value += text },
-      (data) => {
+    await postSse("/api/assessment/career/analyze", { answers: answers.value, batchId: batchId.value }, {
+      chunk: (data) => { streamText.value += data.text },
+      done: (data) => {
         result.value = data as typeof result.value
         phase.value = "result"
       },
-      (msg) => { errorMsg.value = msg; phase.value = "error" },
-    )
+      error: (data) => { errorMsg.value = data.message; phase.value = "error" },
+    })
   } catch (e) {
     errorMsg.value = e instanceof Error ? e.message : "分析失败"
     phase.value = "error"
@@ -220,10 +189,29 @@ onMounted(generateQuestions)
           <h3 class="font-medium">学习建议</h3>
           <p class="mt-1 text-sm text-muted">{{ result.result.recommendation }}</p>
         </div>
+
+        <!-- 已同步到技能图谱的技能 -->
+        <div v-if="result.linked && result.linked.length > 0">
+          <h3 class="font-medium">已同步 {{ result.linked.length }} 项技能到图谱</h3>
+          <div class="mt-2 flex flex-wrap gap-2">
+            <UBadge
+              v-for="link in result.linked"
+              :key="link.skillId"
+              :color="link.status === 'mastered' ? 'success' : 'neutral'"
+              variant="soft"
+            >
+              {{ link.name }}
+            </UBadge>
+          </div>
+        </div>
       </div>
       <template #footer>
         <div class="flex gap-3">
-          <UButton to="/positions" label="查看技能图谱" />
+          <!-- 有方向就直接进本人图谱页并自动分析，否则回列表页 -->
+          <UButton
+            :to="result.positionId ? `/positions/${result.positionId}?autoAnalyze=1` : '/positions'"
+            :label="result.positionId ? '查看我的技能图谱' : '查看技能图谱'"
+          />
           <UButton to="/" variant="soft" label="返回首页" />
         </div>
       </template>

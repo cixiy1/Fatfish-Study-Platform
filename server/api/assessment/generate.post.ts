@@ -1,14 +1,18 @@
+import { randomUUID } from "node:crypto"
 import {
 	findAllSkills,
+	findAssessmentByType,
 	findAssessmentRecordsByUser,
 	findUserProfile,
 	findUserSkills,
+	insertDynamicQuestions,
 	parseProfileData,
 } from "../../repositories/learning.repository"
 import { findUserByAccount } from "../../repositories/user.repository"
 import { chatStream } from "../../utils/llm"
 import { requireLlm } from "../../utils/llm-guard"
 import { readSession } from "../../utils/session"
+import { openSse } from "../../utils/sse"
 
 /**
  * 动态出题（流式）：POST /api/assessment/generate
@@ -22,10 +26,6 @@ interface GeneratedQuestion {
 	question: string
 	options: string[]
 	category: string
-}
-
-function sseWrite(event: string, data: unknown): string {
-	return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
 }
 
 function tryParseQuestions(text: string): GeneratedQuestion[] | null {
@@ -61,6 +61,9 @@ export default defineEventHandler(async (event) => {
 	if (!user) throw createError({ statusCode: 401, message: "用户不存在" })
 
 	requireLlm()
+
+	// 动态题要挂在具体测评下才落得了库；取不到就退化成「只出题不落库」
+	const assessment = findAssessmentByType("career")
 
 	const profile = findUserProfile(user.id)
 	const profileData = parseProfileData(profile?.profile_data ?? null)
@@ -117,11 +120,7 @@ export default defineEventHandler(async (event) => {
 		},
 	]
 
-	setResponseHeader(event, "Content-Type", "text/event-stream")
-	setResponseHeader(event, "Cache-Control", "no-cache")
-	setResponseHeader(event, "Connection", "keep-alive")
-
-	const res = event.node.res
+	const sse = openSse(event)
 	let fullText = ""
 
 	try {
@@ -131,23 +130,41 @@ export default defineEventHandler(async (event) => {
 			maxTokens: 4096,
 			timeoutMs: 60_000,
 			tag: `assessment-gen:${user.id}`,
+			signal: sse.signal,
 		})) {
 			fullText += chunk
-			res.write(sseWrite("chunk", { text: chunk }))
+			sse.write("chunk", { text: chunk })
 		}
 
 		const questions = tryParseQuestions(fullText)
 
 		if (questions) {
-			res.write(sseWrite("done", { questions }))
+			// 动态题落库：分析时要按 batchId 取回「当时真正展示给用户的这套题」，
+			// 否则只能用种子题去配对答案，题数不一致会 400，一致也会错位
+			if (assessment) {
+				const batchId = randomUUID()
+				try {
+					insertDynamicQuestions({
+						assessmentId: assessment.id,
+						userId: user.id,
+						batchId,
+						questions,
+					})
+					sse.write("done", { questions, batchId })
+					return
+				} catch (storeError) {
+					console.warn(`[assessment] 动态题目落库失败 user=${user.id}`, storeError)
+				}
+			}
+			sse.write("done", { questions })
 		} else {
-			res.write(sseWrite("error", { message: "题目生成失败，请重试" }))
+			sse.write("error", { message: "题目生成失败，请重试" })
 		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "出题失败"
 		console.warn(`[assessment] generate failed user=${user.id} error=${message}`)
-		res.write(sseWrite("error", { message }))
+		sse.write("error", { message })
 	} finally {
-		res.end()
+		sse.close()
 	}
 })

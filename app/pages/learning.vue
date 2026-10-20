@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import type { GenRow } from "~/components/PlanGeneratingList.vue"
+import { postSse } from "~/composables/useSse"
+
 /**
  * 关卡路径：把学习路径渲染成多邻国式的蛇形关卡地图。
  * 数据来自 /api/learning-path（路径 + items）与 /api/skills（技能名映射）。
@@ -126,6 +129,9 @@ async function removePath(pathId: number) {
 
 const toast = useToast()
 const regenerating = ref(false)
+// 重新生成时的逐条进度（有内容就替换关卡地图显示）
+const genRows = ref<GenRow[]>([])
+const genElapsedMs = ref(0)
 
 /**
  * 重新生成降级路径：删掉旧路径再按同一方向走一次生成。
@@ -136,22 +142,159 @@ async function regenerate() {
   if (!path || regenerating.value) return
 
   regenerating.value = true
+  genRows.value = []
+  genElapsedMs.value = 0
+  const startedAt = Date.now()
+  const timer = window.setInterval(() => { genElapsedMs.value = Date.now() - startedAt }, 1000)
+
   try {
     await $fetch(`/api/learning-path/${path.id}`, { method: "DELETE" })
-    await $fetch("/api/learning-path/generate", {
-      method: "POST",
-      body: { position_id: path.target_position_id, generate_content: true },
-      timeout: 240_000,
+
+    await postSse("/api/learning-path/generate.stream", { position_id: path.target_position_id }, {
+      start: (data) => {
+        genRows.value = (data.items ?? []).map((item: GenRow) => ({
+          skillId: item.skillId,
+          index: item.index,
+          name: item.name,
+          status: "pending",
+        }))
+      },
+      skill_start: (data) => updateGenRow(data, { status: "writing", attempt: data.attempt }),
+      skill_retry: (data) => updateGenRow(data, { status: "writing", attempt: data.attempt }),
+      skill_done: (data) => updateGenRow(data, { status: "ok", material: data.material }),
+      skill_fail: (data) => updateGenRow(data, { status: "failed", reason: data.reason }),
+      error: (data) => {
+        throw new Error(data.message)
+      },
     })
+
     selectedId.value = null
     await refresh()
     toast.add({ title: "已重新生成", description: "关卡正文已更新", color: "success", icon: "i-lucide-sparkles" })
   } catch (err) {
-    const message = (err as { data?: { message?: string } })?.data?.message
+    const message = err instanceof Error ? err.message : (err as { data?: { message?: string } })?.data?.message
     toast.add({ title: "重新生成失败", description: message || "请稍后重试", color: "error" })
   } finally {
+    clearInterval(timer)
     regenerating.value = false
+    genRows.value = []
   }
+}
+
+function updateGenRow(data: { skillId: number }, patch: Partial<GenRow>): void {
+  const row = genRows.value.find(r => r.skillId === data.skillId)
+  if (row) Object.assign(row, patch)
+}
+
+// --- 阶段测评闭环：出题 → 作答 → 判分 → 采纳（回写掌握度并重排路径）---
+type McStage = "idle" | "generating" | "answering" | "scored" | "accepted"
+
+interface McQuestion {
+  index: number
+  skillName: string
+  question: string
+  options: string[]
+}
+
+interface McVerdict {
+  skillId: number | null
+  name: string
+  mastered: boolean
+  reason: string
+}
+
+const mcStage = ref<McStage>("idle")
+const mcBusy = ref(false)
+const mcError = ref<string | null>(null)
+const mcCheckId = ref<number | null>(null)
+const mcQuestions = ref<McQuestion[]>([])
+const mcAnswers = ref<number[]>([])
+const mcResult = ref<{
+  score: number
+  total: number
+  feedback: string
+  ruleBased: boolean
+  perSkill: McVerdict[]
+} | null>(null)
+const mcAccepted = ref<{
+  mastered: number[]
+  review: number[]
+  reopened: number
+  reviewMoved: number
+} | null>(null)
+
+const mcCanStart = computed(() => llmReady.value && completed.value > 0 && mcStage.value === "idle")
+const mcAnsweredAll = computed(() => mcAnswers.value.length === mcQuestions.value.length
+  && mcAnswers.value.every((a) => a >= 0))
+
+async function startCheck() {
+  const path = activePath.value
+  if (!path) return
+  mcBusy.value = true
+  mcError.value = null
+  mcStage.value = "generating"
+  try {
+    const data = await $fetch<{ checkId: number, questions: McQuestion[] }>("/api/mastery-check/generate", {
+      method: "POST",
+      body: { pathId: path.id },
+    })
+    mcCheckId.value = data.checkId
+    mcQuestions.value = data.questions
+    mcAnswers.value = data.questions.map(() => -1)
+    mcStage.value = "answering"
+  } catch (err) {
+    mcStage.value = "idle"
+    mcError.value = (err as { data?: { message?: string } })?.data?.message
+      || (err instanceof Error ? err.message : "出题失败")
+  } finally {
+    mcBusy.value = false
+  }
+}
+
+async function submitCheck() {
+  if (!mcCheckId.value || !mcAnsweredAll.value) return
+  mcBusy.value = true
+  mcError.value = null
+  try {
+    mcResult.value = await $fetch<typeof mcResult.value>("/api/mastery-check/" + mcCheckId.value + "/score", {
+      method: "POST",
+      body: { answers: mcAnswers.value },
+    })
+    mcStage.value = "scored"
+  } catch (err) {
+    mcError.value = (err as { data?: { message?: string } })?.data?.message
+      || (err instanceof Error ? err.message : "判分失败")
+  } finally {
+    mcBusy.value = false
+  }
+}
+
+async function acceptCheck() {
+  if (!mcCheckId.value) return
+  mcBusy.value = true
+  mcError.value = null
+  try {
+    mcAccepted.value = await $fetch<typeof mcAccepted.value>("/api/mastery-check/" + mcCheckId.value + "/accept", {
+      method: "POST",
+    })
+    mcStage.value = "accepted"
+    await refresh()
+  } catch (err) {
+    mcError.value = (err as { data?: { message?: string } })?.data?.message
+      || (err instanceof Error ? err.message : "采纳失败")
+  } finally {
+    mcBusy.value = false
+  }
+}
+
+function resetCheck() {
+  mcStage.value = "idle"
+  mcCheckId.value = null
+  mcQuestions.value = []
+  mcAnswers.value = []
+  mcResult.value = null
+  mcAccepted.value = null
+  mcError.value = null
 }
 </script>
 
@@ -228,7 +371,151 @@ async function regenerate() {
       />
     </div>
 
-    <LearnPathMap :items="mapItems" class="mt-6" />
+    <!-- 重新生成时展示逐条进度，否则显示关卡地图 -->
+    <PlanGeneratingList
+      v-if="regenerating && genRows.length > 0"
+      class="mt-6"
+      :rows="genRows"
+      :elapsed-ms="genElapsedMs"
+      title="正在重新生成关卡内容"
+    />
+    <LearnPathMap v-else :items="mapItems" class="mt-6" />
+
+    <!-- 阶段测评：学完几关后检验是否真掌握，采纳后回写掌握度并把没掌握的关卡挪成复习关 -->
+    <UCard v-if="activePath && completed > 0" class="mt-6">
+      <div class="mb-3 flex items-center gap-2">
+        <UIcon name="i-lucide-clipboard-check" class="size-4 text-primary" />
+        <span class="text-sm font-medium">阶段测评</span>
+        <UBadge v-if="mcStage === 'accepted'" color="success" variant="soft" size="sm">
+          已采纳
+        </UBadge>
+        <UBadge v-else-if="completed > 0" color="neutral" variant="soft" size="sm">
+          已可测 {{ completed }} 关
+        </UBadge>
+      </div>
+
+      <UAlert
+        v-if="mcError"
+        color="error"
+        variant="soft"
+        :description="mcError"
+        class="mb-3"
+      />
+
+      <template v-if="mcStage === 'idle'">
+        <p class="text-sm text-muted">
+          针对最近学完的关卡出一套选择题，判完分可以把结论写回技能图谱，
+          没掌握的关卡会自动挪到路径末尾标成复习关。
+        </p>
+        <UButton
+          class="mt-3"
+          size="sm"
+          color="primary"
+          variant="soft"
+          icon="i-lucide-clipboard-check"
+          label="开始测评"
+          :loading="mcBusy"
+          :disabled="!mcCanStart"
+          @click="startCheck"
+        />
+        <p v-if="!llmReady" class="mt-2 text-xs text-muted">
+          大模型未配置，无法出题
+        </p>
+      </template>
+
+      <div v-else-if="mcStage === 'generating'" class="space-y-2">
+        <p class="text-sm text-muted">大模型正在出题…</p>
+        <USkeleton class="h-4 w-3/4" />
+        <USkeleton class="h-4 w-2/3" />
+      </div>
+
+      <template v-else-if="mcStage === 'answering'">
+        <div v-for="(q, i) in mcQuestions" :key="i" class="mb-4">
+          <p class="text-sm font-medium">
+            {{ i + 1 }}. {{ q.question }}
+          </p>
+          <p class="mb-2 text-xs text-muted">{{ q.skillName }}</p>
+          <div class="flex flex-wrap gap-2">
+            <UButton
+              v-for="(opt, oi) in q.options"
+              :key="oi"
+              size="xs"
+              :variant="mcAnswers[i] === oi ? 'solid' : 'outline'"
+              :color="mcAnswers[i] === oi ? 'primary' : 'neutral'"
+              :label="opt"
+              @click="mcAnswers[i] = oi"
+            />
+          </div>
+        </div>
+        <UButton
+          size="sm"
+          color="primary"
+          label="提交作答"
+          :loading="mcBusy"
+          :disabled="!mcAnsweredAll"
+          @click="submitCheck"
+        />
+      </template>
+
+      <template v-else-if="mcStage === 'scored' && mcResult">
+        <div class="mb-3 flex items-center gap-2">
+          <span class="text-lg font-semibold">{{ mcResult.score }}/{{ mcResult.total }}</span>
+          <UBadge :color="mcResult.ruleBased ? 'warning' : 'success'" variant="soft" size="sm">
+            {{ mcResult.ruleBased ? "按规则判定（模型不可用）" : "模型判定" }}
+          </UBadge>
+        </div>
+        <p class="text-sm text-muted">{{ mcResult.feedback }}</p>
+        <div class="mt-3 flex flex-wrap gap-2">
+          <UBadge
+            v-for="v in mcResult.perSkill"
+            :key="v.name"
+            :color="v.mastered ? 'success' : 'error'"
+            variant="soft"
+            size="sm"
+          >
+            {{ v.name }} · {{ v.mastered ? "已掌握" : "待复习" }}
+          </UBadge>
+        </div>
+        <div class="mt-4 flex gap-2">
+          <UButton
+            size="sm"
+            color="primary"
+            icon="i-lucide-check"
+            label="采纳结论"
+            :loading="mcBusy"
+            @click="acceptCheck"
+          />
+          <UButton
+            size="sm"
+            variant="ghost"
+            color="neutral"
+            label="不采纳"
+            @click="resetCheck"
+          />
+        </div>
+      </template>
+
+      <template v-else-if="mcStage === 'accepted' && mcAccepted">
+        <p class="text-sm">
+          已把 {{ mcAccepted.mastered.length }} 项技能标为已掌握；
+          <template v-if="mcAccepted.reopened > 0">
+            {{ mcAccepted.reopened }} 个关卡已退回待学并挪到路径末尾标为复习关。
+          </template>
+          <template v-else-if="mcAccepted.reviewMoved > 0">
+            {{ mcAccepted.reviewMoved }} 个关卡已挪到路径末尾标为复习关。
+          </template>
+          <template v-else>没有需要复习的关卡。</template>
+        </p>
+        <UButton
+          class="mt-3"
+          size="sm"
+          variant="ghost"
+          color="neutral"
+          label="再测一次"
+          @click="resetCheck"
+        />
+      </template>
+    </UCard>
 
     <!-- 管理学习方向：日常不用，收在底部 -->
     <details v-if="activePath" class="mt-8 rounded-xl border border-default p-4">

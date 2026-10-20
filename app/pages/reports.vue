@@ -1,5 +1,7 @@
 <script setup lang="ts">
 
+import { postSse } from "~/composables/useSse"
+
 useHead({ title: "学习复盘 · FSP" })
 
 interface Report {
@@ -14,6 +16,17 @@ const generating = ref(false)
 const reports = ref<Report[]>([])
 const currentReport = ref<Record<string, unknown> | null>(null)
 const errorMessage = ref("")
+
+// 大模型叙述的流式片段；stats 事件一到，数字区就已经渲染完，这里只补文字
+const streamText = ref("")
+const narrativePreview = computed(() => {
+  const text = streamText.value
+  const fenced = text.indexOf("```json")
+  if (fenced >= 0) return text.slice(0, fenced).trim()
+  const brace = text.indexOf("{")
+  if (brace >= 0) return text.slice(0, brace).trim()
+  return text.trim()
+})
 
 const reportHighlights = computed(() => (currentReport.value?.highlights as string[] | undefined) ?? [])
 const reportGaps = computed(() => (currentReport.value?.gaps as string[] | undefined) ?? [])
@@ -44,12 +57,27 @@ onMounted(loadReports)
 async function generate() {
   generating.value = true
   errorMessage.value = ""
+  streamText.value = ""
+  currentReport.value = null
+
   try {
-    currentReport.value = await $fetch("/api/reports/generate", { method: "POST" })
-    await loadReports()
+    await postSse("/api/reports/generate.stream", {}, {
+      // 客观数字先到，先把统计区填满，用户不用干等大模型
+      stats: (data) => {
+        currentReport.value = { ...data, aiGenerated: false, summary: "" }
+      },
+      chunk: (data) => { streamText.value += data.text ?? "" },
+      done: async (data) => {
+        currentReport.value = data
+        streamText.value = ""
+        await loadReports()
+      },
+      error: (data) => {
+        errorMessage.value = data.message ?? "生成失败，请稍后重试"
+      },
+    })
   } catch (error) {
-    const data = (error as { data?: { message?: string } })?.data
-    errorMessage.value = data?.message || "生成失败，请稍后重试"
+    errorMessage.value = error instanceof Error ? error.message : "生成失败，请稍后重试"
   } finally {
     generating.value = false
   }
@@ -148,11 +176,20 @@ function viewReport(report: Report) {
               <UBadge v-if="isAiGenerated" color="success" variant="soft" size="sm">
                 {{ reportModel || "大模型" }}
               </UBadge>
+              <UBadge v-else-if="generating" color="info" variant="soft" size="sm">
+                正在生成
+              </UBadge>
               <UBadge v-else color="warning" variant="soft" size="sm">
                 本次未生成文字复盘
               </UBadge>
             </div>
-            <p class="text-sm leading-relaxed text-muted">
+            <p
+              v-if="generating"
+              class="whitespace-pre-wrap text-sm leading-relaxed text-muted"
+            >
+              {{ narrativePreview }}<span class="animate-pulse text-primary">▌</span>
+            </p>
+            <p v-else class="text-sm leading-relaxed text-muted">
               {{ (currentReport.summary as string) || (currentReport.recommendation as string) }}
             </p>
             <p v-if="!isAiGenerated && degradedReason" class="mt-2 text-xs text-warning">

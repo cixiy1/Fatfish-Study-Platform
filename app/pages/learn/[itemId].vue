@@ -3,6 +3,8 @@
  * 单关学习页：一关 = 一个技能点 + 一个学习资源。
  * 完成动作走 PATCH /api/learning-path/item/:id，成功后刷新仪表盘并回关卡地图。
  */
+import { postSse } from "~/composables/useSse"
+
 const route = useRoute()
 const id = Number(route.params.itemId)
 
@@ -65,6 +67,37 @@ const { refresh } = useLearner()
 const toast = useToast()
 
 const completing = ref(false)
+
+// 本关追问：带上 pathItemId，服务端会把这一关的正文塞进上下文，
+// 否则模型不知道用户问的「这里」指的是哪一段
+const followQuestion = ref("")
+const followAnswer = ref("")
+const followAsking = ref(false)
+const followError = ref<string | null>(null)
+
+async function askFollowUp() {
+  const text = followQuestion.value.trim()
+  if (!text) return
+
+  followAsking.value = true
+  followError.value = null
+  followAnswer.value = ""
+
+  try {
+    await postSse("/api/qa/stream", { question: text, pathItemId: id }, {
+      chunk: (data) => { followAnswer.value += data.text ?? "" },
+      done: (data) => {
+        followAnswer.value = data.answer ?? followAnswer.value
+        followQuestion.value = ""
+      },
+      error: (data) => { followError.value = data.message ?? "追问失败" },
+    })
+  } catch (err) {
+    followError.value = err instanceof Error ? err.message : "追问失败"
+  } finally {
+    followAsking.value = false
+  }
+}
 
 // 打开即视为"进行中"，让路径页能反映真实进度
 onMounted(() => {
@@ -228,6 +261,51 @@ async function complete() {
       />
     </section>
 
+    <!-- 本关追问：就地提问，不用跳到答疑页再重述一遍背景 -->
+    <UCard class="mt-8">
+      <div class="mb-3 flex items-center gap-2">
+        <UIcon name="i-lucide-message-circle-question" class="size-4 text-primary" />
+        <span class="text-sm font-medium">对这一关还有疑问？</span>
+      </div>
+      <div class="flex gap-2">
+        <UInput
+          v-model="followQuestion"
+          placeholder="例如：这段里的盒模型到底指什么？"
+          class="flex-1"
+          size="sm"
+          :disabled="followAsking"
+          @keyup.enter="askFollowUp"
+        />
+        <UButton
+          size="sm"
+          color="primary"
+          variant="soft"
+          :loading="followAsking"
+          :disabled="!followQuestion.trim()"
+          label="追问"
+          @click="askFollowUp"
+        />
+      </div>
+
+      <UAlert
+        v-if="followError"
+        color="error"
+        variant="soft"
+        title="追问失败"
+        :description="followError"
+        class="mt-3"
+      />
+
+      <div v-if="followAsking || followAnswer" class="mt-4 border-t border-default pt-3">
+        <div v-if="followAnswer" class="follow-answer text-sm" v-html="renderMarkdown(followAnswer)" />
+        <div v-else class="space-y-2">
+          <USkeleton class="h-4 w-11/12" />
+          <USkeleton class="h-4 w-3/4" />
+        </div>
+        <p v-if="followAsking" class="mt-2 animate-pulse text-xs text-primary">正在生成…</p>
+      </div>
+    </UCard>
+
     <div class="mt-10">
       <UButton
         v-if="detail.item.status !== 'completed'"
@@ -357,5 +435,27 @@ async function complete() {
 .lesson-body :deep(hr) {
   margin: 1.5rem 0;
   border-color: var(--ui-border);
+}
+
+.follow-answer :deep(p) {
+  margin: 0.4rem 0;
+  line-height: 1.7;
+}
+
+.follow-answer :deep(ul),
+.follow-answer :deep(ol) {
+  margin: 0.4rem 0;
+  padding-left: 1.25rem;
+}
+
+.follow-answer :deep(ul) {
+  list-style: disc;
+}
+
+.follow-answer :deep(code) {
+  border-radius: 0.25rem;
+  background: var(--ui-bg-elevated);
+  padding: 0.1rem 0.3rem;
+  font-size: 0.8125rem;
 }
 </style>

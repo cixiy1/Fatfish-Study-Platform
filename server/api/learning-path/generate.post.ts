@@ -102,7 +102,8 @@ export default defineEventHandler(async (event) => {
 	const pending = [] as typeof gapSkills
 
 	for (const skill of gapSkills) {
-		const ready = findReadyResourceBySkill(skill.id)
+		// 只复用为当前方向生成的资料：同名技能可能挂在语言完全不同的方向上
+		const ready = findReadyResourceBySkill(skill.id, positionId)
 
 		if (ready && ready.model !== "stub") {
 			resourceIds.set(skill.id, { id: ready.id, minutes: ready.estimated_minutes })
@@ -123,13 +124,14 @@ export default defineEventHandler(async (event) => {
 		if (wantContent && pending.length > 0) {
 			const result = await generatePlanMaterials(pending, {
 				positionName: position.name,
+				positionId,
 				goal: aiDirection?.profile?.goal ?? profile?.learning_goal ?? null,
 				level: aiDirection?.profile?.level ?? null,
 				dailyMinutes: getPlanSettings(user.id).dailyMinutes,
 			})
 
 			const minutesById = new Map(result.materials.map((m) => [m.skillId, m.minutes]))
-			for (const [skillId, resourceId] of persistMaterials(result.materials, replaceById)) {
+			for (const [skillId, resourceId] of persistMaterials(result.materials, replaceById, positionId)) {
 				resourceIds.set(skillId, { id: resourceId, minutes: minutesById.get(skillId) ?? null })
 			}
 
@@ -150,7 +152,7 @@ export default defineEventHandler(async (event) => {
 
 			// 没走模型时退回已有的外链资料；一个都没有就只留技能点，页面会提示
 			if (!hit) {
-				const seeded = findResourcesBySkill(skill.id)[0]
+				const seeded = findResourcesBySkill(skill.id, positionId)[0]
 				addLearningPathItem(pathId, skill.id, seeded?.id ?? null, order++, "lesson", seeded?.duration ?? null)
 				continue
 			}
