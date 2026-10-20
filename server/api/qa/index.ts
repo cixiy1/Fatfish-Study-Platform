@@ -35,13 +35,22 @@ async function handleQuestion(event: Parameters<Parameters<typeof defineEventHan
 	let answer: string
 	let context: string | null = null
 
+	const DIFFICULTY: Record<string, string> = {
+		beginner: "入门",
+		intermediate: "进阶",
+		advanced: "高级",
+	}
+
 	if (matchedSkills.length > 0 || matchedResources.length > 0) {
 		const skillList = matchedSkills.slice(0, 5).map((s) => `- ${s.name}：${s.description ?? ""}`).join("\n")
-		const resList = matchedResources.slice(0, 5).map((r) => `- ${r.title}（${r.difficulty}）${r.url ? `[链接](${r.url})` : ""}`).join("\n")
-		answer = `根据你的问题，找到以下相关知识：\n\n**相关技能：**\n${skillList || "暂无"}\n\n**学习资源：**\n${resList || "暂无"}`
+		const resList = matchedResources
+			.slice(0, 5)
+			.map((r) => `- ${r.title}（${DIFFICULTY[r.difficulty] ?? r.difficulty}）${r.url ? ` [链接](${r.url})` : ""}`)
+			.join("\n")
+		answer = `匹配到以下知识点：\n\n**相关技能**\n${skillList || "- 无"}\n\n**学习资源**\n${resList || "- 无"}`
 		context = JSON.stringify({ skills: matchedSkills.map((s) => s.id), resources: matchedResources.map((r) => r.id) })
 	} else {
-		answer = `暂未找到与"${question}"直接匹配的知识点。建议尝试：\n\n1. 使用更具体的技术名称（如 Vue、SQL、Python）\n2. 浏览岗位技能图谱查看可用技能\n3. 查看学习资源列表`
+		answer = `未找到与「${question}」匹配的知识点。可以尝试：\n\n1. 使用更具体的术语，如 Vue、SQL、Python\n2. 在「技能图谱」中查找相关技能\n3. 浏览学习资源列表`
 	}
 
 	createQARecord(userId, question, answer, context)

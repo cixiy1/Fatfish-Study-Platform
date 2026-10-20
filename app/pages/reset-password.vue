@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { isStrongPassword } from "#shared/utils/validate"
 
+definePageMeta({ layout: "blank" })
+
 useHead({
   title: "重置密码 · FSP",
   meta: [{ name: "robots", content: "noindex" }],

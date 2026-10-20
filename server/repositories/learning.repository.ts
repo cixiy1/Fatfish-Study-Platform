@@ -8,20 +8,77 @@ import { getDb } from "../utils/db"
 
 // --- 岗位 ---
 
-export function findAllPositions(): { id: number, name: string, category: string, description: string | null, icon: string | null, skill_count: number }[] {
+export function findAllPositions(userId: number | null = null): { id: number, name: string, category: string, description: string | null, icon: string | null, skill_count: number }[] {
+	// 种子岗位（owner_user_id IS NULL）所有人可见；AI 生成的方向只有本人可见，且草稿态不展示
 	return getDb()
 		.prepare(`
 			SELECT p.*, COUNT(ps.skill_id) AS skill_count
 			FROM positions p
 			LEFT JOIN position_skills ps ON ps.position_id = p.id
+			WHERE p.status <> 'archived'
+			  AND (p.owner_user_id IS NULL OR p.owner_user_id = ?)
 			GROUP BY p.id
 			ORDER BY p.category, p.id
 		`)
-		.all() as { id: number, name: string, category: string, description: string | null, icon: string | null, skill_count: number }[]
+		.all(userId) as { id: number, name: string, category: string, description: string | null, icon: string | null, skill_count: number }[]
 }
 
-export function findPositionById(id: number): { id: number, name: string, category: string, description: string | null, icon: string | null } | null {
-	return (getDb().prepare("SELECT * FROM positions WHERE id = ?").get(id) as { id: number, name: string, category: string, description: string | null, icon: string | null } | undefined) ?? null
+export function findPositionById(id: number): { id: number, name: string, category: string, description: string | null, icon: string | null, source: string, status: string, owner_user_id: number | null } | null {
+	return (getDb().prepare("SELECT * FROM positions WHERE id = ?").get(id) as {
+		id: number
+		name: string
+		category: string
+		description: string | null
+		icon: string | null
+		source: string
+		status: string
+		owner_user_id: number | null
+	} | undefined) ?? null
+}
+
+/** 按名称查重：优先命中种子岗位，其次命中本人的 AI 岗位 */
+export function findPositionByName(name: string, userId: number | null = null): { id: number, name: string, source: string, owner_user_id: number | null } | null {
+	return (getDb()
+		.prepare(`
+			SELECT id, name, source, owner_user_id FROM positions
+			WHERE name = ? AND (owner_user_id IS NULL OR owner_user_id = ?)
+			ORDER BY owner_user_id IS NOT NULL, id
+			LIMIT 1
+		`)
+		.get(name, userId) as { id: number, name: string, source: string, owner_user_id: number | null } | undefined) ?? null
+}
+
+/** 创建 AI 生成的方向（草稿态，生成路径后转 active） */
+export function createAiPosition(input: {
+	userId: number
+	name: string
+	category: string
+	description: string | null
+	icon: string | null
+}): number {
+	return Number(getDb()
+		.prepare(`
+			INSERT INTO positions (name, category, description, icon, owner_user_id, source, status, generated_at)
+			VALUES (?, ?, ?, ?, ?, 'ai', 'draft', datetime('now'))
+		`)
+		.run(input.name, input.category, input.description, input.icon, input.userId).lastInsertRowid)
+}
+
+/** 写入岗位技能（AI 方向按模型给出的顺序） */
+export function addPositionSkill(positionId: number, skillId: number, requiredLevel = 1, sortOrder = 0): void {
+	getDb()
+		.prepare(`
+			INSERT INTO position_skills (position_id, skill_id, required_level, sort_order)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(position_id, skill_id) DO UPDATE SET
+				required_level = excluded.required_level,
+				sort_order = excluded.sort_order
+		`)
+		.run(positionId, skillId, requiredLevel, sortOrder)
+}
+
+export function updatePositionStatus(positionId: number, status: string): void {
+	getDb().prepare("UPDATE positions SET status = ? WHERE id = ?").run(status, positionId)
 }
 
 // --- 技能 ---
@@ -42,6 +99,32 @@ export function findSkillsByPosition(positionId: number): { id: number, name: st
 			ORDER BY s.level, s.id
 		`)
 		.all(positionId) as { id: number, name: string, category: string, parent_id: number | null, level: number, description: string | null, required_level: number }[]
+}
+
+/** 按名称找技能（大小写不敏感）；用于「模型给的技能名，库里已经有了就复用」 */
+export function findSkillByName(name: string): { id: number, name: string, category: string, parent_id: number | null, level: number, description: string | null } | null {
+	const row = getDb()
+		.prepare("SELECT * FROM skills WHERE name = ? COLLATE NOCASE LIMIT 1")
+		.get(name.trim()) as { id: number, name: string, category: string, parent_id: number | null, level: number, description: string | null } | undefined
+	return row ?? null
+}
+
+/**
+ * 新建技能（学习平台不限定领域，模型可以提出任何主题的技能点）。
+ * `skills.name` 没有 UNIQUE 约束，所以调用方要先 findSkillByName 去重。
+ */
+export function createSkill(input: {
+	name: string
+	category: string
+	level?: number
+	description?: string | null
+}): number {
+	return Number(
+		getDb()
+			.prepare("INSERT INTO skills (name, category, level, description) VALUES (?, ?, ?, ?)")
+			.run(input.name, input.category, input.level ?? 1, input.description ?? null)
+			.lastInsertRowid,
+	)
 }
 
 // --- 用户技能 ---
@@ -148,6 +231,51 @@ export function upsertUserProfile(userId: number, data: {
 	}
 }
 
+// --- 学习计划设置（存 user_profiles.profile_data，避免加列） ---
+
+export interface PlanSettings {
+	dailyMinutes: number
+}
+
+const DEFAULT_PLAN_SETTINGS: PlanSettings = { dailyMinutes: 20 }
+
+/** 解析 profile_data JSON；损坏或非对象一律当空对象 */
+export function parseProfileData(raw: string | null): Record<string, unknown> {
+	if (!raw) return {}
+	try {
+		const data = JSON.parse(raw) as unknown
+		if (!data || typeof data !== "object" || Array.isArray(data)) return {}
+		return data as Record<string, unknown>
+	} catch {
+		return {}
+	}
+}
+
+/**
+ * 通用 merge 写入 profile_data。
+ *
+ * 只覆盖传入的键，保留其余内容。之前的实现是「读出 {dailyMinutes} 再整体写回」，
+ * 会把测评写入的 result 等键冲掉，所以统一走这里。
+ */
+export function mergeProfileData(userId: number, patch: Record<string, unknown>): Record<string, unknown> {
+	const existing = findUserProfile(userId)
+	const merged = { ...parseProfileData(existing?.profile_data ?? null), ...patch }
+	upsertUserProfile(userId, { profile_data: JSON.stringify(merged) })
+	return merged
+}
+
+export function getPlanSettings(userId: number): PlanSettings {
+	const data = parseProfileData(findUserProfile(userId)?.profile_data ?? null)
+	const minutes = Number(data.dailyMinutes)
+	return Number.isFinite(minutes) && minutes > 0
+		? { ...DEFAULT_PLAN_SETTINGS, dailyMinutes: minutes }
+		: { ...DEFAULT_PLAN_SETTINGS }
+}
+
+export function setDailyMinutes(userId: number, dailyMinutes: number): void {
+	mergeProfileData(userId, { dailyMinutes })
+}
+
 // --- 学习资源 ---
 
 export function findResourcesBySkill(skillId: number): { id: number, title: string, type: string, url: string | null, difficulty: string, description: string | null, duration: number | null }[] {
@@ -162,6 +290,141 @@ export function findAllResources(): { id: number, title: string, type: string, u
 		.all() as { id: number, title: string, type: string, url: string | null, skill_id: number | null, difficulty: string, description: string | null, duration: number | null }[]
 }
 
+/** 已有正文的资源可直接复用，避免同一技能重复调用模型 */
+export function findReadyResourceBySkill(skillId: number): { id: number, title: string, content: string | null, summary: string | null, objectives: string | null, estimated_minutes: number | null, model: string | null } | null {
+	return (getDb()
+		.prepare(`
+			SELECT id, title, content, summary, objectives, duration AS estimated_minutes, model
+			FROM learning_resources
+			WHERE skill_id = ? AND status = 'ready' AND content IS NOT NULL AND content <> ''
+			ORDER BY id DESC LIMIT 1
+		`)
+		.get(skillId) as { id: number, title: string, content: string | null, summary: string | null, objectives: string | null, estimated_minutes: number | null, model: string | null } | undefined) ?? null
+}
+
+/** 单条资源详情（含正文），单关页用 */
+export function findResourceById(resourceId: number): {
+	id: number
+	title: string
+	type: string
+	url: string | null
+	difficulty: string
+	description: string | null
+	summary: string | null
+	objectives: string | null
+	content: string | null
+	duration: number | null
+	source: string
+	status: string
+	model: string | null
+} | null {
+	return (getDb()
+		.prepare(`
+			SELECT id, title, type, url, difficulty, description, summary, objectives,
+			       content, duration, source, status, model
+			FROM learning_resources
+			WHERE id = ?
+		`)
+		.get(resourceId) as {
+		id: number
+		title: string
+		type: string
+		url: string | null
+		difficulty: string
+		description: string | null
+		summary: string | null
+		objectives: string | null
+		content: string | null
+		duration: number | null
+		source: string
+		status: string
+		model: string | null
+	} | undefined) ?? null
+}
+
+/** 写入模型生成的关卡资料，返回资源 id */
+export function insertGeneratedResource(input: {
+	skillId: number | null
+	title: string
+	summary: string
+	objectives: string[]
+	content: string
+	difficulty: string
+	estimatedMinutes: number
+	model: string
+}): number {
+	return Number(getDb()
+		.prepare(`
+			INSERT INTO learning_resources
+				(title, type, url, skill_id, difficulty, description, duration, content, summary, objectives, source, status, generated_at, model)
+			VALUES (?, 'article', NULL, ?, ?, ?, ?, ?, ?, ?, 'ai', 'ready', datetime('now'), ?)
+		`)
+		.run(
+			input.title,
+			input.skillId,
+			input.difficulty,
+			input.summary,
+			input.estimatedMinutes,
+			input.content,
+			input.summary,
+			JSON.stringify(input.objectives),
+			input.model,
+		).lastInsertRowid)
+}
+
+/**
+ * 原地覆盖一条已有资料。
+ *
+ * 用于「把离线模板升级成模型正文」：同一技能重复生成时不新增行，
+ * 否则每次重新生成都会在库里堆一份重复资源。
+ */
+export function updateGeneratedResource(id: number, input: {
+	title: string
+	summary: string
+	objectives: string[]
+	content: string
+	difficulty: string
+	estimatedMinutes: number
+	model: string
+}): void {
+	getDb()
+		.prepare(`
+			UPDATE learning_resources SET
+				title = ?, difficulty = ?, description = ?, duration = ?,
+				content = ?, summary = ?, objectives = ?,
+				source = 'ai', status = 'ready',
+				generated_at = datetime('now'), model = ?
+			WHERE id = ?
+		`)
+		.run(
+			input.title,
+			input.difficulty,
+			input.summary,
+			input.estimatedMinutes,
+			input.content,
+			input.summary,
+			JSON.stringify(input.objectives),
+			input.model,
+			id,
+		)
+}
+
+/** 生成失败时降级为外链资料，保证路径一定有可点的东西 */
+export function insertFallbackResource(input: {
+	skillId: number | null
+	title: string
+	url: string
+	description: string | null
+}): number {
+	return Number(getDb()
+		.prepare(`
+			INSERT INTO learning_resources
+				(title, type, url, skill_id, difficulty, description, duration, source, status, generated_at)
+			VALUES (?, 'article', ?, ?, 'beginner', ?, 15, 'ai-fallback', 'fallback', datetime('now'))
+		`)
+		.run(input.title, input.url, input.skillId, input.description).lastInsertRowid)
+}
+
 // --- 学习路径 ---
 
 export function createLearningPath(userId: number, name: string, targetPositionId: number | null): number {
@@ -170,22 +433,50 @@ export function createLearningPath(userId: number, name: string, targetPositionI
 		.run(userId, name, targetPositionId).lastInsertRowid)
 }
 
-export function addLearningPathItem(pathId: number, skillId: number | null, resourceId: number | null, sortOrder: number): void {
+export function addLearningPathItem(
+	pathId: number,
+	skillId: number | null,
+	resourceId: number | null,
+	sortOrder: number,
+	itemType = "lesson",
+	estimatedMinutes: number | null = null,
+): void {
 	getDb()
-		.prepare("INSERT INTO learning_path_items (path_id, skill_id, resource_id, sort_order) VALUES (?, ?, ?, ?)")
-		.run(pathId, skillId, resourceId, sortOrder)
+		.prepare(`
+			INSERT INTO learning_path_items (path_id, skill_id, resource_id, sort_order, item_type, estimated_minutes)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`)
+		.run(pathId, skillId, resourceId, sortOrder, itemType, estimatedMinutes)
 }
 
-export function findLearningPathsByUser(userId: number): { id: number, name: string, target_position_id: number | null, status: string, created_at: string, updated_at: string }[] {
-	return getDb()
-		.prepare("SELECT id, name, target_position_id, status, created_at, updated_at FROM learning_paths WHERE user_id = ? ORDER BY created_at DESC")
-		.all(userId) as { id: number, name: string, target_position_id: number | null, status: string, created_at: string, updated_at: string }[]
+/** 更新路径的生成状态（generating / ready / degraded / failed） */
+export function updatePathGenerationStatus(pathId: number, status: string, model: string | null = null, errorMessage: string | null = null): void {
+	getDb()
+		.prepare(`
+			UPDATE learning_paths SET
+				generation_status = ?,
+				model = COALESCE(?, model),
+				generated_at = CASE WHEN ? IN ('ready','degraded') THEN datetime('now') ELSE generated_at END,
+				error_message = ?,
+				updated_at = datetime('now')
+			WHERE id = ?
+		`)
+		.run(status, model, status, errorMessage, pathId)
 }
 
-export function findLearningPathItems(pathId: number): { id: number, skill_id: number | null, resource_id: number | null, sort_order: number, status: string, started_at: string | null, completed_at: string | null }[] {
+export function findLearningPathsByUser(userId: number): { id: number, name: string, target_position_id: number | null, status: string, generation_status: string, created_at: string, updated_at: string }[] {
 	return getDb()
-		.prepare("SELECT id, skill_id, resource_id, sort_order, status, started_at, completed_at FROM learning_path_items WHERE path_id = ? ORDER BY sort_order")
-		.all(pathId) as { id: number, skill_id: number | null, resource_id: number | null, sort_order: number, status: string, started_at: string | null, completed_at: string | null }[]
+		.prepare("SELECT id, name, target_position_id, status, generation_status, created_at, updated_at FROM learning_paths WHERE user_id = ? ORDER BY created_at DESC")
+		.all(userId) as { id: number, name: string, target_position_id: number | null, status: string, generation_status: string, created_at: string, updated_at: string }[]
+}
+
+export function findLearningPathItems(pathId: number): { id: number, skill_id: number | null, resource_id: number | null, sort_order: number, status: string, item_type: string, estimated_minutes: number | null, started_at: string | null, completed_at: string | null }[] {
+	return getDb()
+		.prepare(`
+			SELECT id, skill_id, resource_id, sort_order, status, item_type, estimated_minutes, started_at, completed_at
+			FROM learning_path_items WHERE path_id = ? ORDER BY sort_order
+		`)
+		.all(pathId) as { id: number, skill_id: number | null, resource_id: number | null, sort_order: number, status: string, item_type: string, estimated_minutes: number | null, started_at: string | null, completed_at: string | null }[]
 }
 
 export function updatePathItemStatus(itemId: number, status: string): void {
@@ -200,11 +491,42 @@ export function updatePathItemStatus(itemId: number, status: string): void {
 	void now
 }
 
-/** 查询单条学习路径（带归属校验） */
-export function findLearningPathById(pathId: number, userId: number): { id: number, name: string, target_position_id: number | null, status: string, created_at: string, updated_at: string } | null {
+/** 查询单条路径项（带归属校验，防止越权改别人的关卡） */
+export function findPathItemForUser(itemId: number, userId: number): { id: number, path_id: number, skill_id: number | null, resource_id: number | null, sort_order: number, status: string, item_type: string, estimated_minutes: number | null, started_at: string | null, completed_at: string | null } | null {
 	return (getDb()
-		.prepare("SELECT id, name, target_position_id, status, created_at, updated_at FROM learning_paths WHERE id = ? AND user_id = ?")
-		.get(pathId, userId) as { id: number, name: string, target_position_id: number | null, status: string, created_at: string, updated_at: string } | undefined) ?? null
+		.prepare(`
+			SELECT i.id, i.path_id, i.skill_id, i.resource_id, i.sort_order, i.status,
+			       i.item_type, i.estimated_minutes, i.started_at, i.completed_at
+			FROM learning_path_items i
+			JOIN learning_paths p ON p.id = i.path_id
+			WHERE i.id = ? AND p.user_id = ?
+		`)
+		.get(itemId, userId) as { id: number, path_id: number, skill_id: number | null, resource_id: number | null, sort_order: number, status: string, item_type: string, estimated_minutes: number | null, started_at: string | null, completed_at: string | null } | undefined) ?? null
+}
+
+/** 查询单条学习路径（带归属校验） */
+export function findLearningPathById(pathId: number, userId: number): { id: number, name: string, target_position_id: number | null, status: string, generation_status: string, created_at: string, updated_at: string } | null {
+	return (getDb()
+		.prepare("SELECT id, name, target_position_id, status, generation_status, created_at, updated_at FROM learning_paths WHERE id = ? AND user_id = ?")
+		.get(pathId, userId) as { id: number, name: string, target_position_id: number | null, status: string, generation_status: string, created_at: string, updated_at: string } | undefined) ?? null
+}
+
+/**
+ * 是否算「已有可用学习计划」。
+ *
+ * 只看路径存在会把「生成中」和「生成失败的空壳」也算进去，
+ * 导致中间件放行后用户进到一条没有关卡的路径。
+ */
+export function hasUsableLearningPath(userId: number): boolean {
+	const row = getDb()
+		.prepare(`
+			SELECT COUNT(*) AS c
+			FROM learning_path_items i
+			JOIN learning_paths p ON p.id = i.path_id
+			WHERE p.user_id = ? AND p.generation_status <> 'failed'
+		`)
+		.get(userId) as { c: number } | undefined
+	return (row?.c ?? 0) > 0
 }
 
 /** 更新学习路径状态（带归属校验）。激活时自动将其他路径置为 archived */
@@ -266,4 +588,108 @@ export function findLearningRecordsByUser(userId: number): { id: number, resourc
 	return getDb()
 		.prepare("SELECT id, resource_id, path_item_id, status, progress, time_spent, created_at FROM learning_records WHERE user_id = ? ORDER BY created_at DESC")
 		.all(userId) as { id: number, resource_id: number | null, path_item_id: number | null, status: string, progress: number, time_spent: number, created_at: string }[]
+}
+
+// --- 阶段测评（mastery_checks） ---
+
+export interface MasteryCheckRow {
+	id: number
+	user_id: number
+	path_id: number
+	skill_ids: string
+	questions: string
+	answers: string | null
+	score: number | null
+	result_data: string | null
+	status: string
+	model: string | null
+	mock: number
+	created_at: string
+	scored_at: string | null
+	accepted_at: string | null
+}
+
+export function createMasteryCheck(input: {
+	userId: number
+	pathId: number
+	skillIds: number[]
+	questions: unknown
+	model: string
+	mock: boolean
+}): number {
+	return Number(getDb()
+		.prepare(`
+			INSERT INTO mastery_checks (user_id, path_id, skill_ids, questions, model, mock, status)
+			VALUES (?, ?, ?, ?, ?, ?, 'ready')
+		`)
+		.run(
+			input.userId,
+			input.pathId,
+			JSON.stringify(input.skillIds),
+			JSON.stringify(input.questions),
+			input.model,
+			input.mock ? 1 : 0,
+		).lastInsertRowid)
+}
+
+export function findMasteryCheckById(checkId: number, userId: number): MasteryCheckRow | null {
+	return (getDb()
+		.prepare("SELECT * FROM mastery_checks WHERE id = ? AND user_id = ?")
+		.get(checkId, userId) as MasteryCheckRow | undefined) ?? null
+}
+
+export function updateMasteryCheckScored(checkId: number, answers: number[], score: number, resultData: string): void {
+	getDb()
+		.prepare(`
+			UPDATE mastery_checks
+			SET answers = ?, score = ?, result_data = ?, status = 'scored', scored_at = datetime('now')
+			WHERE id = ?
+		`)
+		.run(JSON.stringify(answers), score, resultData, checkId)
+}
+
+export function updateMasteryCheckAccepted(checkId: number): void {
+	getDb()
+		.prepare("UPDATE mastery_checks SET status = 'accepted', accepted_at = datetime('now') WHERE id = ?")
+		.run(checkId)
+}
+
+/** 把某路径下指定技能的待学关卡移到末尾并标为复习关（只动 pending，in_progress 保持原位） */
+export function moveSkillsToReview(pathId: number, skillIds: number[]): number {
+	if (skillIds.length === 0) return 0
+	const db = getDb()
+	const placeholders = skillIds.map(() => "?").join(",")
+
+	const maxRow = db.prepare("SELECT COALESCE(MAX(sort_order), -1) AS m FROM learning_path_items WHERE path_id = ?").get(pathId) as { m: number }
+	let cursor = maxRow.m + 1
+
+	const rows = db
+		.prepare(`
+			SELECT id FROM learning_path_items
+			WHERE path_id = ? AND skill_id IN (${placeholders}) AND status = 'pending'
+			ORDER BY sort_order
+		`)
+		.all(pathId, ...skillIds) as { id: number }[]
+
+	const update = db.prepare("UPDATE learning_path_items SET sort_order = ?, item_type = 'review' WHERE id = ?")
+	const run = db.transaction(() => {
+		for (const row of rows) {
+			update.run(cursor++, row.id)
+		}
+	})
+	run()
+	return rows.length
+}
+
+/** 重新压紧 sort_order，避免移动后出现稀疏序号 */
+export function normalizePathOrder(pathId: number): void {
+	const db = getDb()
+	const rows = db
+		.prepare("SELECT id FROM learning_path_items WHERE path_id = ? ORDER BY sort_order, id")
+		.all(pathId) as { id: number }[]
+	const update = db.prepare("UPDATE learning_path_items SET sort_order = ? WHERE id = ?")
+	const run = db.transaction(() => {
+		rows.forEach((row, index) => update.run(index, row.id))
+	})
+	run()
 }

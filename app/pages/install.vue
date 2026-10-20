@@ -4,6 +4,8 @@ import type { SmtpPreset, LlmProvider } from "#shared/types/auth"
 import { SMTP_PRESETS, LLM_PROVIDER_DEFAULTS } from "#shared/types/auth"
 import { validateInstallPayload } from "#shared/utils/validate-install"
 
+definePageMeta({ layout: "blank" })
+
 useHead({ title: "初始化安装 · FSP" })
 
 const { testConnection, setup } = useInstall()
@@ -24,11 +26,8 @@ const form = reactive({
 	},
 	oauth: {
 		github: { enabled: false, clientId: "", clientSecret: "" },
-		qq: { enabled: false, clientId: "", clientSecret: "" },
-		wechat: { enabled: false, clientId: "", clientSecret: "" },
 	},
 	llm: {
-		enabled: false,
 		provider: "openai" as LlmProvider,
 		baseUrl: "",
 		apiKey: "",
@@ -43,6 +42,8 @@ const testMessage = ref<{ color: "success" | "error" | "warning", title: string,
 const smtpTesting = ref(false)
 const smtpTestTo = ref("")
 const smtpTestMessage = ref<{ color: "success" | "error" | "warning", title: string, text?: string } | null>(null)
+const llmTesting = ref(false)
+const llmTestMessage = ref<{ color: "success" | "error" | "warning", title: string, text?: string } | null>(null)
 const message = ref<{ color: "success" | "error" | "warning", title: string, text?: string } | null>(null)
 
 const smtpPresetOptions = [
@@ -110,6 +111,23 @@ async function onTestSmtp() {
 	}
 }
 
+async function onTestLlm() {
+	llmTestMessage.value = null
+	llmTesting.value = true
+	try {
+		const res = await $fetch<{ message: string, reply?: string }>("/api/install/test-llm", {
+			method: "POST",
+			body: { llm: { ...form.llm } },
+			timeout: 40_000,
+		})
+		llmTestMessage.value = { color: "success", title: res.message, text: res.reply }
+	} catch (error) {
+		llmTestMessage.value = { color: "error", title: "大模型调用失败", text: extractMessage(error) }
+	} finally {
+		llmTesting.value = false
+	}
+}
+
 async function onSubmit() {
 	message.value = null
 
@@ -117,7 +135,6 @@ async function onSubmit() {
 		message.value = { color: "warning", title: "两次输入的密码不一致" }
 		return
 	}
-
 	const payload: InstallPayload = {
 		database: { file: form.database.file },
 		admin: {
@@ -141,29 +158,20 @@ async function onSubmit() {
 		}
 	}
 
-	const hasOAuth = form.oauth.github.enabled || form.oauth.qq.enabled || form.oauth.wechat.enabled
+	const hasOAuth = form.oauth.github.enabled
 	if (hasOAuth) {
 		payload.oauth = {
-			github: form.oauth.github.enabled
-				? { clientId: form.oauth.github.clientId, clientSecret: form.oauth.github.clientSecret }
-				: undefined,
-			qq: form.oauth.qq.enabled
-				? { clientId: form.oauth.qq.clientId, clientSecret: form.oauth.qq.clientSecret }
-				: undefined,
-			wechat: form.oauth.wechat.enabled
-				? { clientId: form.oauth.wechat.clientId, clientSecret: form.oauth.wechat.clientSecret }
-				: undefined,
+			github: { clientId: form.oauth.github.clientId, clientSecret: form.oauth.github.clientSecret },
 		}
 	}
 
-	if (form.llm.enabled) {
-		payload.llm = {
-			provider: form.llm.provider,
-			baseUrl: form.llm.baseUrl || undefined,
-			apiKey: form.llm.apiKey,
-			model: form.llm.model,
-			maxTokens: form.llm.maxTokens,
-		}
+	// 大模型是必填项，不做「跳过」分支
+	payload.llm = {
+		provider: form.llm.provider,
+		baseUrl: form.llm.baseUrl || undefined,
+		apiKey: form.llm.apiKey,
+		model: form.llm.model,
+		maxTokens: form.llm.maxTokens,
 	}
 
 	const check = validateInstallPayload(payload)
@@ -193,7 +201,7 @@ async function onSubmit() {
 					FSP 初始化安装
 				</h1>
 				<p class="mt-1 text-sm text-neutral-500">
-					首次部署请在此完成数据库与管理员配置，配置将保存到服务器本地。
+          首次部署请完成数据库、管理员与大模型配置，配置保存至服务器本地。大模型为必填项，未配置将无法完成首次引导。
 				</p>
 			</template>
 
@@ -327,22 +335,17 @@ async function onSubmit() {
 						OAuth 第三方登录（可选）
 					</h2>
 					<p class="text-sm text-neutral-500">
-						可跳过，后续在管理后台配置。需在各平台开发者中心创建应用并获取凭证。
+						可跳过，后续在管理后台配置。在 GitHub Settings → Developer settings → OAuth Apps 创建应用并获取凭证。
 					</p>
 					<div class="space-y-4">
-						<div
-v-for="p in [
-							{ key: 'github', label: 'GitHub' },
-							{ key: 'qq', label: 'QQ 互联' },
-							{ key: 'wechat', label: '微信' }
-						]" :key="p.key" class="rounded-lg border border-neutral-200 p-4 dark:border-neutral-800">
+						<div class="rounded-lg border border-neutral-200 p-4 dark:border-neutral-800">
 							<div class="mb-3 flex items-center justify-between">
-								<span class="font-medium">{{ p.label }}</span>
-								<USwitch v-model="form.oauth[p.key].enabled" />
+								<span class="font-medium">GitHub</span>
+								<USwitch v-model="form.oauth.github.enabled" />
 							</div>
-							<div v-if="form.oauth[p.key].enabled" class="grid gap-3 sm:grid-cols-2">
-								<UInput v-model="form.oauth[p.key].clientId" placeholder="Client ID" class="w-full" />
-								<UInput v-model="form.oauth[p.key].clientSecret" type="password" placeholder="Client Secret" class="w-full" />
+							<div v-if="form.oauth.github.enabled" class="grid gap-3 sm:grid-cols-2">
+								<UInput v-model="form.oauth.github.clientId" placeholder="Client ID" class="w-full" />
+								<UInput v-model="form.oauth.github.clientSecret" type="password" placeholder="Client Secret" class="w-full" />
 							</div>
 						</div>
 					</div>
@@ -351,14 +354,17 @@ v-for="p in [
 				<section class="space-y-3">
 					<div class="flex items-center justify-between">
 						<h2 class="font-medium">
-							大模型 AI 接口配置（可选）
+							大模型 AI 接口配置（必填）
 						</h2>
-						<USwitch v-model="form.llm.enabled" />
+						<UBadge color="error" variant="soft" size="sm">
+							必填
+						</UBadge>
 					</div>
-					<p v-if="!form.llm.enabled" class="text-sm text-neutral-500">
-						跳过则不配置 AI 接口，智能答疑等功能将使用关键词匹配。可后续在管理后台配置。
+					<p class="text-sm text-neutral-500">
+						方向访谈、路径规划与关卡资料均由大模型生成，未配置则无法完成首次引导。
+						支持 OpenAI 兼容协议（华为云 MaaS、DeepSeek、通义、智谱等）与 Anthropic。
 					</p>
-					<div v-else class="space-y-3">
+					<div class="space-y-3">
 						<div>
 							<label class="mb-1 block text-sm">提供商</label>
 							<USelect v-model="form.llm.provider" :items="llmProviderOptions" class="w-full" />
@@ -381,6 +387,23 @@ v-for="p in [
 								<UInput v-model.number="form.llm.maxTokens" type="number" placeholder="4096" class="w-full" />
 							</div>
 						</div>
+						<div class="flex items-center gap-3">
+							<UButton
+								variant="soft"
+								:loading="llmTesting"
+								:disabled="!form.llm.apiKey || !form.llm.model"
+								@click="onTestLlm"
+							>
+								测试大模型连接
+							</UButton>
+							<span class="text-xs text-neutral-500">建议先点一次，确认 Key 和模型名都能用再安装</span>
+						</div>
+						<UAlert
+							v-if="llmTestMessage"
+							:color="llmTestMessage.color"
+							:title="llmTestMessage.title"
+							:description="llmTestMessage.text"
+						/>
 					</div>
 				</section>
 

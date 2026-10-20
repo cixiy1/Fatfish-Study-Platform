@@ -1,5 +1,4 @@
 <script setup lang="ts">
-definePageMeta({ layout: 'learning' })
 
 useHead({ title: "技能图谱 · FSP" })
 

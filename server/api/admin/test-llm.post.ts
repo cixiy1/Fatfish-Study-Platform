@@ -1,14 +1,21 @@
 import type { TestLlmRequest, TestLlmResponse } from "#shared/types/auth"
 import { requireAdmin } from "../../utils/admin-guard"
 import { getLlmConfig } from "../../repositories/settings.repository"
+import { isLlmMockForced, probeLlm } from "../../utils/llm"
 
 /**
  * 测试大模型连接：POST /api/admin/test-llm
  *
- * 使用当前保存的 LLM 配置发送一条测试消息。
+ * 走真实请求（自动区分 OpenAI 兼容 / Anthropic 协议），**禁止 mock**：
+ * 这里必须把 401、超时、模型名错误等真实问题暴露给管理员，
+ * 否则线上会一直以为「只是没生效」而查不出配置错。
  */
 export default defineEventHandler(async (event) => {
 	requireAdmin(event)
+
+	if (isLlmMockForced()) {
+		throw createError({ statusCode: 400, message: "当前处于离线模式（FSP_LLM_MOCK=1），无法测试真实连接" })
+	}
 
 	const body = await readBody<TestLlmRequest>(event).catch(() => null)
 	const prompt = (body?.prompt ?? "你好，请回复测试成功").trim()
@@ -19,37 +26,15 @@ export default defineEventHandler(async (event) => {
 	}
 
 	try {
-		const reply = await callLlm(config, prompt)
+		const result = await probeLlm(config, prompt)
 		const response: TestLlmResponse = {
 			ok: true,
-			message: "大模型连接成功",
-			reply,
+			message: `大模型连接成功（${result.model}，${result.durationMs}ms）`,
+			reply: result.text || "(空回复)",
 		}
 		return response
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "请求失败"
-		throw createError({ statusCode: 500, message: `大模型请求失败: ${message}` })
+		throw createError({ statusCode: 502, message: `大模型请求失败: ${message}` })
 	}
 })
-
-/** 调用大模型 API（兼容 OpenAI Chat Completions 格式） */
-async function callLlm(config: { provider: string, baseUrl: string, apiKey: string, model: string, maxTokens: number }, prompt: string): Promise<string> {
-	const url = `${config.baseUrl.replace(/\/$/, "")}/chat/completions`
-
-	const res = await $fetch<{ choices?: { message?: { content?: string } }[] }>(url, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			Authorization: `Bearer ${config.apiKey}`,
-		},
-		body: {
-			model: config.model,
-			max_tokens: config.maxTokens,
-			messages: [
-				{ role: "user", content: prompt },
-			],
-		},
-	})
-
-	return res.choices?.[0]?.message?.content ?? "(空回复)"
-}

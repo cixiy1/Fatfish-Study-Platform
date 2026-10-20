@@ -1,4 +1,4 @@
-import { handleCallback, processOAuthUser } from "../../../utils/oauth"
+import { handleGitHubCallback, processOAuthUser } from "../../../utils/oauth"
 import { setSession } from "../../../utils/session"
 
 /**
@@ -14,7 +14,7 @@ export default defineEventHandler(async (event) => {
 	}
 
 	try {
-		const result = await handleCallback("github", code)
+		const result = await handleGitHubCallback(code)
 		const sessionUser = await processOAuthUser(result)
 		setSession(event, sessionUser)
 		return sendRedirect(event, "/", 302)

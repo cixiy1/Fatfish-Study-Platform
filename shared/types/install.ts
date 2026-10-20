@@ -38,14 +38,12 @@ export interface InstallSmtpInput {
 	from: string
 }
 
-/** 安装时可选的 OAuth 凭证（各平台独立可选） */
+/** 安装时可选的 OAuth 凭证（当前只支持 GitHub） */
 export interface InstallOAuthInput {
 	github?: OAuthPlatformCredentials
-	qq?: OAuthPlatformCredentials
-	wechat?: OAuthPlatformCredentials
 }
 
-/** 安装时可选的大模型配置 */
+/** 安装时必须填写的大模型配置（平台的 AI 功能全部依赖它） */
 export interface InstallLlmInput {
 	provider: LlmProvider
 	baseUrl?: string
@@ -62,8 +60,8 @@ export interface InstallPayload {
 	smtp?: InstallSmtpInput
 	/** 可选 OAuth 凭证，跳过则不配置第三方登录 */
 	oauth?: InstallOAuthInput
-	/** 可选大模型配置，跳过则不配置 AI 功能 */
-	llm?: InstallLlmInput
+	/** 必填：大模型接口，没有它连首次引导都走不完 */
+	llm: InstallLlmInput
 }
 
 export interface ConnectionTestResult {

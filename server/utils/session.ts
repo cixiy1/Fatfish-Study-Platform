@@ -22,12 +22,16 @@ interface SessionPayload extends SessionUser {
 const COOKIE_NAME = "fsp_session"
 
 /** 签名密钥：优先已安装配置，其次环境变量，最后开发兜底 */
-function getSecret(): string {
+export function getSessionSecret(): string {
 	return (
 		readConfig()?.security.sessionSecret
 		?? process.env.FSP_SESSION_SECRET
 		?? "fsp-dev-insecure-secret"
 	)
+}
+
+function getSecret(): string {
+	return getSessionSecret()
 }
 
 function serialize(user: SessionUser, maxAge?: number): string {

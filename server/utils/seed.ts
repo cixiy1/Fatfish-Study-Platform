@@ -143,17 +143,17 @@ function seedAssessments(db: Database): void {
 	const insertA = db.prepare("INSERT INTO assessments (type, title, description) VALUES (?, ?, ?)")
 	const insertQ = db.prepare("INSERT INTO assessment_questions (assessment_id, question, options, correct_index, category, sort_order) VALUES (?, ?, ?, ?, ?, ?)")
 
-	const aid = Number(insertA.run("career", "职业能力摸底测评", "评估你的基础能力与职业倾向，生成初始用户画像").lastInsertRowid)
+	const aid = Number(insertA.run("career", "基础能力测评", "评估学习基础与偏好，用于生成初始画像").lastInsertRowid)
 
 	const questions = [
-		{ q: "你更倾向于哪种工作方式？", opts: ["独立钻研技术问题", "团队协作完成项目", "与客户沟通需求", "规划和管理流程"], cat: "工作风格" },
+		{ q: "你更倾向于哪种学习方式？", opts: ["独立钻研技术问题", "团队协作完成项目", "与客户沟通需求", "规划和管理流程"], cat: "学习风格" },
 		{ q: "面对一个新技术，你的学习方式是？", opts: ["先看官方文档", "跟着视频教程做", "直接上手写代码", "找项目练手"], cat: "学习风格" },
-		{ q: "你最有兴趣的领域是？", opts: ["前端界面与交互", "后端服务与架构", "数据分析与可视化", "AI 与机器学习"], cat: "职业意向" },
+		{ q: "你最有兴趣的领域是？", opts: ["前端界面与交互", "后端服务与架构", "数据分析与可视化", "AI 与机器学习"], cat: "方向偏好" },
 		{ q: "你目前的编程经验是？", opts: ["零基础", "能写简单脚本", "做过完整项目", "有工作经验"], cat: "基础水平" },
 		{ q: "遇到 bug 时你通常？", opts: ["先搜索报错信息", "打断点调试", "问同事或社区", "从头检查逻辑"], cat: "问题解决" },
 		{ q: "你希望学习的节奏是？", opts: ["系统化循序渐进", "项目驱动快速上手", "按需查阅即学即用", "理论实践并重"], cat: "学习偏好" },
 		{ q: "你对数学/统计的态度？", opts: ["很喜欢", "能接受", "尽量避开", "想补强"], cat: "基础能力" },
-		{ q: "你的职业目标是？", opts: ["技术专家/架构师", "技术管理", "全栈独立开发", "转行入门"], cat: "职业意向" },
+		{ q: "你的学习目标是？", opts: ["深入技术方向", "支撑当前学业", "独立完成项目", "跨方向入门"], cat: "方向偏好" },
 	]
 
 	questions.forEach((item, i) => {

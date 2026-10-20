@@ -152,9 +152,8 @@ export function runInstall(payload: InstallPayload): AppConfig {
 	if (payload.oauth) {
 		setOAuthConfig(payload.oauth)
 	}
-	if (payload.llm) {
-		setLlmConfig(resolveLlmConfig(payload.llm))
-	}
+	// 必填：没有大模型，平台装完也走不完首次引导
+	setLlmConfig(resolveLlmConfig(payload.llm))
 
 	return config
 }

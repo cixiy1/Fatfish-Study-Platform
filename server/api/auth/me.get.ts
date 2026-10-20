@@ -1,5 +1,5 @@
 import { findUserByAccount } from "../../repositories/user.repository"
-import { findUserProfile, findLearningPathsByUser } from "../../repositories/learning.repository"
+import { findUserProfile, hasUsableLearningPath } from "../../repositories/learning.repository"
 
 /**
  * 当前登录用户：GET /api/auth/me
@@ -19,8 +19,7 @@ export default defineEventHandler((event) => {
 	}
 
 	const profile = findUserProfile(user.id)
-	const paths = findLearningPathsByUser(user.id)
-	const hasLearningPath = paths.length > 0
+	const hasLearningPath = hasUsableLearningPath(user.id)
 
 	return {
 		account: sessionUser.account,

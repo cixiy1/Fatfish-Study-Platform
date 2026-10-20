@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { isValidEmail } from "#shared/utils/validate"
 
+definePageMeta({ layout: "blank" })
+
 useHead({
   title: "忘记密码 · FSP",
   meta: [{ name: "robots", content: "noindex" }],

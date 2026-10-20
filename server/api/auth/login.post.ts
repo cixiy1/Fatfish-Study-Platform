@@ -1,5 +1,5 @@
 import { findUserByAccount, touchLastLogin } from "../../repositories/user.repository"
-import { findUserProfile, findLearningPathsByUser } from "../../repositories/learning.repository"
+import { findUserProfile, hasUsableLearningPath } from "../../repositories/learning.repository"
 import { isInstalled } from "../../utils/app-config"
 import { verifyPassword } from "../../utils/password"
 
@@ -54,7 +54,7 @@ export default defineEventHandler(async (event) => {
 	setSession(event, sessionUser, body?.remember ? 60 * 60 * 24 * 7 : undefined)
 
 	const profile = findUserProfile(user.id)
-	const paths = findLearningPathsByUser(user.id)
+	const hasPath = hasUsableLearningPath(user.id)
 
 	return {
 		user: {
@@ -62,7 +62,7 @@ export default defineEventHandler(async (event) => {
 			role: user.role,
 			career_direction: profile?.career_direction ?? null,
 			assessment_completed: profile?.assessment_completed ?? 0,
-			has_learning_path: paths.length > 0,
+			has_learning_path: hasPath,
 		},
 	}
 })

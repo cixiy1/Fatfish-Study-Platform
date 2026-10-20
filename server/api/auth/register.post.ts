@@ -10,6 +10,7 @@ import {
 	createUser,
 	findUserByAccount,
 	findUserByEmail,
+	updateUserStatus,
 } from "../../repositories/user.repository"
 import {
 	cleanExpiredByUser,
@@ -81,27 +82,33 @@ export default defineEventHandler(async (event) => {
 		status: "pending",
 	})
 
-	// 生成验证 token
+	// SMTP 未配置时跳过邮箱验证，直接激活；已配置时发送验证邮件
+	const smtpConfig = getSmtpConfig()
+	const siteName = readConfig()?.site.name ?? "FSP"
+	let emailSent = false
+
+	if (!smtpConfig) {
+		updateUserStatus(user.id, "active")
+		return {
+			user: { account: user.account, name: user.name },
+			emailSent: false,
+			message: "注册成功，可直接登录（未配置 SMTP，已跳过邮箱验证）",
+		}
+	}
+
 	const token = randomBytes(32).toString("hex")
 	const expiresAt = new Date(Date.now() + TOKEN_TTL_MS).toISOString()
 	cleanExpiredByUser(user.id)
 	createToken({ userId: user.id, token, expiresAt })
 
-	// 尝试发送验证邮件
-	const smtpConfig = getSmtpConfig()
-	const siteName = readConfig()?.site.name ?? "FSP"
-	let emailSent = false
-
-	if (smtpConfig) {
-		try {
-			const siteUrl = (readConfig()?.site.url ?? "").replace(/\/$/, "")
-			const verificationUrl = `${siteUrl}/api/auth/verify-email?token=${token}`
-			await sendVerificationEmail(smtpConfig, email, verificationUrl, siteName)
-			emailSent = true
-		} catch (error) {
-			console.error("[register] 验证邮件发送失败:", error instanceof Error ? error.message : error)
-			emailSent = false
-		}
+	try {
+		const siteUrl = (readConfig()?.site.url ?? "").replace(/\/$/, "")
+		const verificationUrl = `${siteUrl}/api/auth/verify-email?token=${token}`
+		await sendVerificationEmail(smtpConfig, email, verificationUrl, siteName)
+		emailSent = true
+	} catch (error) {
+		console.error("[register] 验证邮件发送失败:", error instanceof Error ? error.message : error)
+		emailSent = false
 	}
 
 	return {
@@ -109,6 +116,6 @@ export default defineEventHandler(async (event) => {
 		emailSent,
 		message: emailSent
 			? "注册成功，请查收验证邮件完成激活"
-			: "注册成功，但验证邮件暂未发送，请联系管理员激活账号",
+			: "注册成功，但验证邮件发送失败，请联系管理员激活账号",
 	}
 })

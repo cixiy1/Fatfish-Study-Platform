@@ -30,12 +30,6 @@ export default defineEventHandler((event) => {
 			github: oauth.github
 				? { clientId: oauth.github.clientId, clientSecret: null }
 				: undefined,
-			qq: oauth.qq
-				? { clientId: oauth.qq.clientId, clientSecret: null }
-				: undefined,
-			wechat: oauth.wechat
-				? { clientId: oauth.wechat.clientId, clientSecret: null }
-				: undefined,
 		},
 		llm: llm
 			? {

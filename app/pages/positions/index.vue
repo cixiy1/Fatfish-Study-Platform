@@ -1,7 +1,6 @@
 <script setup lang="ts">
-definePageMeta({ layout: 'learning' })
 
-useHead({ title: "岗位技能图谱 · FSP" })
+useHead({ title: "技能图谱 · FSP" })
 
 interface Position {
   id: number
@@ -38,8 +37,8 @@ const categoryColor: Record<string, string> = {
 <template>
   <UContainer class="py-10">
     <div class="mb-8">
-      <h1 class="text-2xl font-semibold tracking-tight">岗位技能图谱</h1>
-      <p class="mt-1 text-sm text-muted">选择岗位查看分层技能体系，标记已掌握技能</p>
+      <h1 class="text-2xl font-semibold tracking-tight">技能图谱</h1>
+      <p class="mt-1 text-sm text-muted">按方向查看技能分层与掌握情况</p>
     </div>
 
     <div v-if="loading" class="py-20 text-center text-muted">加载中…</div>
@@ -53,7 +52,7 @@ const categoryColor: Record<string, string> = {
       >
         <div class="flex items-start gap-4">
           <div class="rounded-lg bg-elevated p-3">
-            <UIcon :name="p.icon || 'i-lucide-briefcase'" class="text-2xl" />
+            <UIcon :name="p.icon || 'i-lucide-compass'" class="text-2xl" />
           </div>
           <div class="flex-1">
             <div class="flex items-center gap-2">
@@ -61,7 +60,7 @@ const categoryColor: Record<string, string> = {
               <UBadge :color="categoryColor[p.category] || 'neutral'" variant="soft" size="sm">{{ p.category }}</UBadge>
             </div>
             <p class="mt-1 text-sm text-muted">{{ p.description }}</p>
-            <p class="mt-2 text-xs text-muted">{{ p.skill_count }} 项技能要求</p>
+            <p class="mt-2 text-xs text-muted">{{ p.skill_count }} 个技能点</p>
           </div>
         </div>
       </UCard>
