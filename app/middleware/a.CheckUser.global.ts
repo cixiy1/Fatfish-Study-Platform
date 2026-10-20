@@ -49,7 +49,9 @@ export default defineNuxtRouteMiddleware(async (to) => {
 
 	// 已登录但尚未制定学习计划 → 主线页面统一挡回计划引导
 	// 注意：`/` 必须单独判断，不能塞进 startsWith 列表——startsWith("/") 会命中所有路径。
-	const REQUIRES_LEARNING_PATH = ["/learning", "/learn", "/qa", "/reports", "/assessment", "/plan"]
+	// `/assessment` 不在列表里：测评的作用就是「在还没有方向时给出方向建议」，
+	// 挡住它会让「先测评 → 再定方向」这条路走不通。
+	const REQUIRES_LEARNING_PATH = ["/learning", "/learn", "/qa", "/reports", "/plan"]
 
 	const needsLearningPath =
 		to.path === "/" || REQUIRES_LEARNING_PATH.some((p) => to.path.startsWith(p))

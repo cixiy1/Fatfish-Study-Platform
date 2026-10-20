@@ -1,8 +1,58 @@
-import { findAssessmentByType, findAssessmentQuestions, createAssessmentRecord, upsertUserProfile } from "../../../repositories/learning.repository"
-import { readSession } from "../../../utils/session"
+import {
+	createAssessmentRecord,
+	findAssessmentByType,
+	findAssessmentQuestions,
+	upsertUserProfile,
+} from "../../../repositories/learning.repository"
 import { findUserByAccount } from "../../../repositories/user.repository"
+import { chatJson } from "../../../utils/llm"
+import { asRecord, str, strArray } from "../../../utils/llm-json"
+import { readSession } from "../../../utils/session"
 
-/** 提交测评：POST /api/assessment/:type/submit */
+/**
+ * 提交测评：POST /api/assessment/:type/submit
+ *
+ * 解读交给大模型：方向、优势、短板、建议、具体学习主题都由模型根据作答给出，
+ * 不再把方向写死成「前端/后端/数据分析/AI 算法」四选一。
+ * 模型不可用时返回中性文案并标注 `aiGenerated=false`，不拿规则结果冒充 AI。
+ */
+
+interface AssessmentAnalysis {
+	careerDirection: string
+	strengths: string[]
+	weaknesses: string[]
+	recommendation: string
+	suggestedTopics: string[]
+}
+
+function validateAnalysis(value: unknown): AssessmentAnalysis {
+	const record = asRecord(value)
+	return {
+		careerDirection: str(record.direction ?? record.careerDirection, 2, 30, "direction"),
+		strengths: strArray(record.strengths ?? [], 0, 4, 40, "strengths"),
+		weaknesses: strArray(record.weaknesses ?? [], 0, 4, 40, "weaknesses"),
+		recommendation: str(record.recommendation, 10, 400, "recommendation"),
+		suggestedTopics: strArray(record.suggestedTopics ?? [], 0, 6, 30, "suggestedTopics"),
+	}
+}
+
+/** 降级结果：只说事实，不推断方向 */
+function fallbackAnalysis(questions: { category: string | null }[], answers: number[]): AssessmentAnalysis {
+	const categories = questions
+		.map((question, index) => (answers[index] >= 0 ? question.category : null))
+		.filter((category): category is string => Boolean(category))
+
+	const unique = [...new Set(categories)].slice(0, 3)
+
+	return {
+		careerDirection: "待进一步确认",
+		strengths: unique,
+		weaknesses: [],
+		recommendation: "本次未能生成 AI 解读（大模型调用失败）。你可以先设定一个具体的学习目标，系统会通过方向访谈细化成可执行的关卡。",
+		suggestedTopics: [],
+	}
+}
+
 export default defineEventHandler(async (event) => {
 	const session = readSession(event)
 	if (!session) throw createError({ statusCode: 401, message: "未登录" })
@@ -22,54 +72,98 @@ export default defineEventHandler(async (event) => {
 		throw createError({ statusCode: 400, message: "答题数量不匹配" })
 	}
 
-	const score = answers.reduce((sum, ans) => sum + (ans >= 0 ? 1 : 0), 0)
+	// 题库没有标准答案，「得分」实际是完成题数，前端文案按完成量展示
+	const answeredCount = answers.reduce((sum, answer) => sum + (answer >= 0 ? 1 : 0), 0)
 
-	const result = analyzeCareer(questions, answers)
-	createAssessmentRecord(user.id, assessment.id, answers, score, JSON.stringify(result))
+	const answerLines = questions.map((question, index) => {
+		const picked = answers[index]
+		const option = picked >= 0 ? question.options[picked] ?? "未作答" : "未作答"
+		const category = question.category ? `［${question.category}］` : ""
+		return `${index + 1}. ${category}${question.question} → ${option}`
+	})
+
+	const messages = [
+		{
+			role: "system" as const,
+			content: [
+				"你是学习顾问，根据测评作答判断学习者的偏好与基础，给出可执行的学习方向。",
+				"硬性要求：",
+				"1. 只依据作答内容判断，不揣测身份、年龄、性别、学历。",
+				"2. 推荐方向必须是**具体的学习主题**（如「Python 数据处理」「品牌视觉设计」「日语 N4 备考」），不要写岗位名。",
+				"3. 建议要具体到下一步做什么，禁止套话。",
+				"4. 只输出 JSON 对象，不要 Markdown 代码块包裹。",
+			].join("\n"),
+		},
+		{
+			role: "user" as const,
+			content: [
+				`测评名称：${assessment.title}`,
+				`学习者作答（共 ${questions.length} 题）：`,
+				...answerLines,
+				"",
+				"请输出：",
+				'{"direction":"推荐学习方向（12字内）","strengths":["2~3条优势"],"weaknesses":["1~2条待补强"],"recommendation":"80字以内，说清先学什么、为什么","suggestedTopics":["3~5个可以立刻开始学的具体主题"]}',
+				"",
+				"字段要求：",
+				"- direction：一个具体主题，不要写「综合开发」这种模糊说法",
+				"- strengths / weaknesses：每条 15 字以内，必须能从作答里找到依据",
+				"- recommendation：给出先后顺序，不要只说「多加练习」",
+				"- suggestedTopics：每条 12 字以内，是学习者能直接搜索的学习内容",
+			].join("\n"),
+		},
+	]
+
+	let analysis: AssessmentAnalysis | null = null
+	let model: string | null = null
+	let degradedReason: string | null = null
+
+	try {
+		const result = await chatJson<AssessmentAnalysis>({
+			messages,
+			temperature: 0.4,
+			maxTokens: 2000,
+			timeoutMs: 60_000,
+			maxAttempts: 2,
+			tag: `assessment:${user.id}`,
+			validate: validateAnalysis,
+			allowMockOnError: false,
+			mock: () => fallbackAnalysis(questions, answers),
+		})
+
+		if (!result.mock) {
+			analysis = result.data
+			model = result.model
+		}
+	} catch (error) {
+		degradedReason = error instanceof Error ? error.message : "大模型调用失败"
+		console.warn(`[assessment] analysis failed user=${user.id} error=${degradedReason}`)
+	}
+
+	const finalAnalysis = analysis ?? fallbackAnalysis(questions, answers)
+	const aiGenerated = analysis !== null
+
+	createAssessmentRecord(
+		user.id,
+		assessment.id,
+		answers,
+		answeredCount,
+		JSON.stringify({ ...finalAnalysis, aiGenerated, model, degradedReason }),
+	)
 
 	if (type === "career") {
 		upsertUserProfile(user.id, {
 			assessment_completed: 1,
-			career_direction: result.careerDirection,
-			profile_data: JSON.stringify(result),
+			career_direction: finalAnalysis.careerDirection,
+			profile_data: JSON.stringify(finalAnalysis),
 		})
 	}
 
-	return { score, total: questions.length, result }
-})
-
-function analyzeCareer(questions: { category: string | null }[], answers: number[]): {
-	careerDirection: string
-	strengths: string[]
-	weaknesses: string[]
-	recommendation: string
-} {
-	const directionMap = ["前端开发", "后端开发", "数据分析", "AI 算法"]
-	const directionScores = [0, 0, 0, 0]
-
-	questions.forEach((q, i) => {
-		const ans = answers[i]
-		// 「方向偏好」是当前题库的分类；「职业意向」用于兼容早期数据
-		if ((q.category === "方向偏好" || q.category === "职业意向") && ans >= 0 && ans < 4) {
-			directionScores[ans] += 2
-		}
-		if (q.category === "基础水平" && ans >= 2) {
-			directionScores[0] += 1; directionScores[1] += 1
-		}
-	})
-
-	const maxIdx = directionScores.indexOf(Math.max(...directionScores))
-	const careerDirection = directionMap[maxIdx] ?? "综合开发"
-
-	const strengths = questions
-		.filter((q, i) => q.category && answers[i] >= 0)
-		.slice(0, 3)
-		.map((q) => q.category ?? "综合能力")
-
 	return {
-		careerDirection,
-		strengths,
-		weaknesses: ["需在后续关卡中补强"],
-		recommendation: `建议优先选择「${careerDirection}」方向，按关卡顺序系统学习。`,
+		score: answeredCount,
+		total: questions.length,
+		result: finalAnalysis,
+		aiGenerated,
+		model,
+		degradedReason,
 	}
-}
+})

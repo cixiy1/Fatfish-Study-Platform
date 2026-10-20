@@ -43,6 +43,20 @@ const categoryColor: Record<string, string> = {
 
     <div v-if="loading" class="py-20 text-center text-muted">加载中…</div>
 
+    <div
+      v-else-if="positions.length === 0"
+      class="rounded-xl border border-dashed border-default py-16 text-center"
+    >
+      <UIcon name="i-lucide-compass" class="mx-auto mb-3 size-8 text-muted" />
+      <p class="font-medium">
+        还没有学习方向
+      </p>
+      <p class="mt-1 text-sm text-muted">
+        通过方向访谈说明你想学什么，系统会把它拆成技能点与每日关卡。
+      </p>
+      <UButton to="/onboarding" class="mt-4" label="创建学习方向" />
+    </div>
+
     <div v-else class="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
       <UCard
         v-for="p in positions"

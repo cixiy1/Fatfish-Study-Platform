@@ -15,7 +15,20 @@ const submitting = ref(false)
 const questions = ref<Question[]>([])
 const answers = ref<number[]>([])
 const currentStep = ref(0)
-const result = ref<{ score: number, total: number, result: { careerDirection: string, strengths: string[], weaknesses: string[], recommendation: string } } | null>(null)
+const result = ref<{
+  score: number
+  total: number
+  result: {
+    careerDirection: string
+    strengths: string[]
+    weaknesses: string[]
+    recommendation: string
+    suggestedTopics: string[]
+  }
+  aiGenerated: boolean
+  model: string | null
+  degradedReason: string | null
+} | null>(null)
 
 onMounted(async () => {
   try {
@@ -69,12 +82,34 @@ async function submit() {
           <UIcon name="i-lucide-check" class="text-3xl text-success" />
         </div>
         <h2 class="text-xl font-semibold">测评完成</h2>
-        <p class="mt-2 text-muted">得分 {{ result.score }} / {{ result.total }}</p>
+        <p class="mt-2 text-muted">已完成 {{ result.score }} / {{ result.total }} 题</p>
+        <UBadge
+          v-if="result.aiGenerated"
+          color="success"
+          variant="soft"
+          size="sm"
+          class="mt-2"
+        >
+          {{ result.model || "大模型" }} 解读
+        </UBadge>
       </div>
       <div class="mt-6 space-y-4">
         <div>
           <h3 class="font-medium">推荐方向</h3>
           <UBadge color="primary" variant="soft" class="mt-1">{{ result.result.careerDirection }}</UBadge>
+        </div>
+        <div v-if="result.result.suggestedTopics.length > 0">
+          <h3 class="font-medium">建议先学</h3>
+          <div class="mt-1 flex flex-wrap gap-2">
+            <UBadge
+              v-for="topic in result.result.suggestedTopics"
+              :key="topic"
+              color="neutral"
+              variant="soft"
+            >
+              {{ topic }}
+            </UBadge>
+          </div>
         </div>
         <div>
           <h3 class="font-medium">优势领域</h3>
@@ -82,9 +117,18 @@ async function submit() {
             <UBadge v-for="s in result.result.strengths" :key="s" color="success" variant="soft">{{ s }}</UBadge>
           </div>
         </div>
+        <div v-if="result.result.weaknesses.length > 0">
+          <h3 class="font-medium">待补强</h3>
+          <div class="mt-1 flex flex-wrap gap-2">
+            <UBadge v-for="w in result.result.weaknesses" :key="w" color="warning" variant="soft">{{ w }}</UBadge>
+          </div>
+        </div>
         <div>
           <h3 class="font-medium">学习建议</h3>
           <p class="mt-1 text-sm text-muted">{{ result.result.recommendation }}</p>
+          <p v-if="!result.aiGenerated && result.degradedReason" class="mt-2 text-xs text-warning">
+            大模型调用失败：{{ result.degradedReason }}
+          </p>
         </div>
       </div>
       <template #footer>

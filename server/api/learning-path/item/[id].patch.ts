@@ -1,4 +1,4 @@
-import { findLearningPathItems, findPathItemForUser, updatePathItemStatus } from "../../../repositories/learning.repository"
+import { findAllSkills, findLearningPathItems, findPathItemForUser, updatePathItemStatus, upsertUserSkill } from "../../../repositories/learning.repository"
 import { readSession } from "../../../utils/session"
 import { findUserByAccount } from "../../../repositories/user.repository"
 
@@ -38,5 +38,13 @@ export default defineEventHandler(async (event) => {
 	}
 
 	updatePathItemStatus(itemId, status)
+
+	// 关卡状态同步到技能掌握：学习报告、技能图谱都读 user_skills，
+	// 不同步的话「已掌握 / 掌握率」会永远是 0
+	if (item.skill_id && status !== "pending") {
+		const level = findAllSkills().find((skill) => skill.id === item.skill_id)?.level ?? 2
+		upsertUserSkill(user.id, item.skill_id, status === "completed" ? "mastered" : "learning", level)
+	}
+
 	return { ok: true }
 })

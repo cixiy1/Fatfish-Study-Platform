@@ -37,6 +37,17 @@ export function renderMarkdown(markdown: string | null | undefined): string {
 
 	let paragraph: string[] = []
 	let list: { ordered: boolean, items: string[] } | null = null
+	/**
+	 * 上一个非空行是否是列表项。
+	 * 用来把「列表项 + 紧跟的说明行」当成同一项：
+	 *
+	 *   1. **单色明度阶**
+	 *   只用一个色相，调出 5 档明度。
+	 *
+	 * 模型基本都这么写。若把说明行当独立段落，列表会被逐项切断，
+	 * 渲染成多个 <ol>，编号全从 1 开始。
+	 */
+	let continueList = false
 
 	function flushParagraph(): void {
 		if (paragraph.length === 0) return
@@ -45,6 +56,7 @@ export function renderMarkdown(markdown: string | null | undefined): string {
 	}
 
 	function flushList(): void {
+		continueList = false
 		if (!list) return
 		const tag = list.ordered ? "ol" : "ul"
 		html.push(`<${tag}>${list.items.map((item) => `<li>${renderInline(item)}</li>`).join("")}</${tag}>`)
@@ -59,9 +71,13 @@ export function renderMarkdown(markdown: string | null | undefined): string {
 	for (let i = 0; i < lines.length; i++) {
 		const line = (lines[i] ?? "").replace(/\s+$/, "")
 
-		// 空行：结束当前块
+		// 空行：结束当前段落。
+		// 这里**不结束列表**：模型常用空行分隔列表项（`1. xxx` 之间空一行），
+		// 一遇空行就 flush 会变成多个独立的 <ol>，渲染出来每项都从 1 开始编号。
+		// 列表真正的结束交给后面的 flushList / flushAll（遇到非列表内容时触发）。
 		if (line.trim() === "") {
-			flushAll()
+			flushParagraph()
+			continueList = false
 			continue
 		}
 
@@ -114,6 +130,15 @@ export function renderMarkdown(markdown: string | null | undefined): string {
 			if (list && list.ordered !== ordered) flushList()
 			if (!list) list = { ordered, items: [] }
 			list.items.push(text)
+			continueList = true
+			continue
+		}
+
+		// 列表项的续行（说明文字）：紧跟在列表项之后、中间没有空行，并入上一项
+		if (list && continueList) {
+			const lastIndex = list.items.length - 1
+			const last = list.items[lastIndex]
+			if (last !== undefined) list.items[lastIndex] = `${last} ${line.trim()}`
 			continue
 		}
 

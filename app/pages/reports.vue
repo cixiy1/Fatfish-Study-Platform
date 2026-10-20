@@ -13,15 +13,27 @@ const loading = ref(true)
 const generating = ref(false)
 const reports = ref<Report[]>([])
 const currentReport = ref<Record<string, unknown> | null>(null)
+const errorMessage = ref("")
+
+const reportHighlights = computed(() => (currentReport.value?.highlights as string[] | undefined) ?? [])
+const reportGaps = computed(() => (currentReport.value?.gaps as string[] | undefined) ?? [])
+const reportNextSteps = computed(
+  () => (currentReport.value?.nextSteps as { title: string, reason: string }[] | undefined) ?? [],
+)
+const skillBreakdown = computed(
+  () => (currentReport.value?.skillBreakdown as Record<string, number> | undefined) ?? {},
+)
+const isAiGenerated = computed(() => currentReport.value?.aiGenerated === true)
+const reportModel = computed(() => (currentReport.value?.model as string | null | undefined) ?? null)
+const degradedReason = computed(() => (currentReport.value?.degradedReason as string | null | undefined) ?? null)
+const isEmptyReport = computed(() => currentReport.value?.empty === true)
 
 async function loadReports() {
   loading.value = true
   try {
     reports.value = await $fetch<Report[]>("/api/reports")
   } catch {
-
-    // 忽略
-
+    errorMessage.value = "加载历史报告失败"
   } finally {
     loading.value = false
   }
@@ -31,27 +43,25 @@ onMounted(loadReports)
 
 async function generate() {
   generating.value = true
+  errorMessage.value = ""
   try {
     currentReport.value = await $fetch("/api/reports/generate", { method: "POST" })
     await loadReports()
-  } catch {
-
-    // 忽略
-
+  } catch (error) {
+    const data = (error as { data?: { message?: string } })?.data
+    errorMessage.value = data?.message || "生成失败，请稍后重试"
   } finally {
     generating.value = false
   }
 }
 
 function viewReport(report: Report) {
-  if (report.summary) {
-    try {
-      currentReport.value = JSON.parse(report.summary)
-    } catch {
-
-      // 忽略
-
-    }
+  if (!report.summary) return
+  try {
+    currentReport.value = JSON.parse(report.summary)
+    errorMessage.value = ""
+  } catch {
+    errorMessage.value = "这条报告的历史格式无法解析"
   }
 }
 </script>
@@ -65,6 +75,14 @@ function viewReport(report: Report) {
       </div>
       <UButton color="primary" :loading="generating" label="生成报告" @click="generate" />
     </div>
+
+    <UAlert
+      v-if="errorMessage"
+      color="warning"
+      variant="soft"
+      class="mb-6"
+      :title="errorMessage"
+    />
 
     <!-- 当前报告 -->
     <div v-if="currentReport" class="mb-8">
@@ -103,20 +121,91 @@ function viewReport(report: Report) {
           <!-- 技能分布 -->
           <div>
             <h3 class="mb-3 font-medium">技能分布</h3>
-            <div class="space-y-2">
-              <div v-for="(val, key) in (currentReport.skillBreakdown as Record<string, number>)" :key="key" class="flex items-center gap-2">
-                <span class="w-16 text-sm text-muted">{{ key }}</span>
-                <UProgress :value="val" :max="10" class="flex-1" />
-                <span class="w-8 text-sm text-right">{{ val }}</span>
+            <div v-if="Object.keys(skillBreakdown).length > 0" class="space-y-2">
+              <div v-for="(val, key) in skillBreakdown" :key="key" class="flex items-center gap-2">
+                <span class="w-16 shrink-0 truncate text-sm text-muted">{{ key }}</span>
+                <UProgress
+                  :value="val"
+                  :max="Math.max(...Object.values(skillBreakdown))"
+                  class="flex-1"
+                />
+                <span class="w-8 text-right text-sm">{{ val }}</span>
               </div>
             </div>
+            <p v-else class="text-sm text-muted">
+              还没有完成任何关卡
+            </p>
           </div>
         </div>
 
-        <!-- 建议 -->
-        <div class="mt-6 rounded-lg bg-elevated p-4">
-          <h3 class="mb-1 font-medium">学习建议</h3>
-          <p class="text-sm text-muted">{{ currentReport.recommendation as string }}</p>
+        <!-- 阶段复盘：文字部分由大模型生成，失败时明确标注 -->
+        <div class="mt-6 space-y-5 border-t border-default pt-6">
+          <div>
+            <div class="mb-2 flex flex-wrap items-center gap-2">
+              <h3 class="font-medium">
+                阶段复盘
+              </h3>
+              <UBadge v-if="isAiGenerated" color="success" variant="soft" size="sm">
+                {{ reportModel || "大模型" }}
+              </UBadge>
+              <UBadge v-else color="warning" variant="soft" size="sm">
+                本次未生成文字复盘
+              </UBadge>
+            </div>
+            <p class="text-sm leading-relaxed text-muted">
+              {{ (currentReport.summary as string) || (currentReport.recommendation as string) }}
+            </p>
+            <p v-if="!isAiGenerated && degradedReason" class="mt-2 text-xs text-warning">
+              大模型调用失败：{{ degradedReason }}
+            </p>
+          </div>
+
+          <div v-if="reportHighlights.length > 0">
+            <h4 class="mb-2 text-sm font-medium">
+              做得好的
+            </h4>
+            <ul class="space-y-1.5 text-sm text-muted">
+              <li v-for="item in reportHighlights" :key="item" class="flex gap-2">
+                <UIcon name="i-lucide-circle-check" class="mt-0.5 size-4 shrink-0 text-success" />
+                <span>{{ item }}</span>
+              </li>
+            </ul>
+          </div>
+
+          <div v-if="reportGaps.length > 0">
+            <h4 class="mb-2 text-sm font-medium">
+              待补强
+            </h4>
+            <ul class="space-y-1.5 text-sm text-muted">
+              <li v-for="item in reportGaps" :key="item" class="flex gap-2">
+                <UIcon name="i-lucide-triangle-alert" class="mt-0.5 size-4 shrink-0 text-warning" />
+                <span>{{ item }}</span>
+              </li>
+            </ul>
+          </div>
+
+          <div v-if="reportNextSteps.length > 0">
+            <h4 class="mb-2 text-sm font-medium">
+              下一步
+            </h4>
+            <ol class="space-y-2">
+              <li v-for="(step, index) in reportNextSteps" :key="step.title" class="flex gap-3">
+                <span
+                  class="mt-0.5 grid size-5 shrink-0 place-items-center rounded-full bg-primary/10 text-xs font-medium text-primary"
+                >
+                  {{ index + 1 }}
+                </span>
+                <div class="min-w-0">
+                  <p class="text-sm font-medium">
+                    {{ step.title }}
+                  </p>
+                  <p v-if="step.reason" class="text-xs text-muted">
+                    {{ step.reason }}
+                  </p>
+                </div>
+              </li>
+            </ol>
+          </div>
         </div>
       </UCard>
     </div>
