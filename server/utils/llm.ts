@@ -429,3 +429,101 @@ export function envInt(name: string, fallback: number): number {
 	const num = Number(raw)
 	return Number.isFinite(num) ? Math.round(num) : fallback
 }
+
+/* -------------------------------------------------------------------------- */
+/* 流式调用                                                                    */
+/* -------------------------------------------------------------------------- */
+
+export interface ChatStreamOptions {
+	messages: LlmMessage[]
+	temperature?: number
+	maxTokens?: number
+	timeoutMs?: number
+	tag?: string
+}
+
+/**
+ * 流式调用大模型，逐块 yield 文本片段。
+ *
+ * 用 native fetch 拿 ReadableStream，按 SSE 协议解析 delta。
+ * OpenAI 和 Anthropic 两种格式都支持。
+ */
+export async function* chatStream(options: ChatStreamOptions): AsyncGenerator<string> {
+	const tag = options.tag ?? "stream"
+	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+
+	const rawSetting = getSetting("llm")
+	const config = getLlmConfig()
+	if (rawSetting && (!config || !config.apiKey)) {
+		throw new LlmKeyUnreadableError()
+	}
+	if (!config) throw new LlmNotConfiguredError()
+
+	const request = buildRequest(config, options.messages, {
+		temperature: options.temperature,
+		maxTokens: options.maxTokens,
+	})
+	const body = { ...request.body, stream: true }
+
+	const response = await fetch(request.endpoint, {
+		method: "POST",
+		headers: request.headers,
+		body: JSON.stringify(body),
+		signal: AbortSignal.timeout(timeoutMs),
+	})
+
+	if (!response.ok || !response.body) {
+		const text = await response.text().catch(() => "")
+		throw new Error(`大模型流式调用失败 status=${response.status} ${text.slice(0, 200)}`)
+	}
+
+	const reader = response.body.getReader()
+	const decoder = new TextDecoder()
+	let buffer = ""
+
+	try {
+		while (true) {
+			const { done, value } = await reader.read()
+			if (done) break
+
+			buffer += decoder.decode(value, { stream: true })
+			const lines = buffer.split("\n")
+			buffer = lines.pop() ?? ""
+
+			for (const line of lines) {
+				const trimmed = line.trim()
+				if (!trimmed || !trimmed.startsWith("data:")) continue
+
+				const data = trimmed.slice(5).trim()
+				if (data === "[DONE]") return
+
+				try {
+					const parsed = JSON.parse(data) as Record<string, unknown>
+					const delta = request.anthropic
+						? extractAnthropicDelta(parsed)
+						: extractOpenAiDelta(parsed)
+					if (delta) yield delta
+				} catch {
+					// JSON 解析失败的单行跳过，SSE 可能有不完整片段
+				}
+			}
+		}
+	} finally {
+		reader.releaseLock()
+	}
+
+	console.info(`[llm] ${tag} stream done protocol=${request.anthropic ? "anthropic" : "openai"} model=${config.model}`)
+}
+
+function extractOpenAiDelta(parsed: Record<string, unknown>): string | null {
+	const choices = parsed.choices as { delta?: { content?: string } }[] | undefined
+	const content = choices?.[0]?.delta?.content
+	return typeof content === "string" && content.length > 0 ? content : null
+}
+
+function extractAnthropicDelta(parsed: Record<string, unknown>): string | null {
+	if (parsed.type !== "content_block_delta") return null
+	const delta = parsed.delta as { type?: string, text?: string } | undefined
+	if (delta?.type !== "text_delta") return null
+	return typeof delta.text === "string" && delta.text.length > 0 ? delta.text : null
+}

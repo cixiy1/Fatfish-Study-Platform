@@ -15,6 +15,9 @@ const submitting = ref(false)
 const questions = ref<Question[]>([])
 const answers = ref<number[]>([])
 const currentStep = ref(0)
+
+const streamingText = ref("")
+const streamDone = ref(false)
 const result = ref<{
   score: number
   total: number
@@ -26,8 +29,6 @@ const result = ref<{
     suggestedTopics: string[]
   }
   aiGenerated: boolean
-  model: string | null
-  degradedReason: string | null
 } | null>(null)
 
 onMounted(async () => {
@@ -51,19 +52,81 @@ const progress = computed(() => {
 
 async function submit() {
   submitting.value = true
+  streamingText.value = ""
+  streamDone.value = false
+
   try {
-    result.value = await $fetch("/api/assessment/career/submit", {
+    const response = await fetch("/api/assessment/career/analyze", {
       method: "POST",
-      body: { answers: answers.value },
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answers: answers.value }),
     })
-  } catch {
 
-    // 忽略
+    if (!response.ok || !response.body) {
+      throw new Error(`请求失败: ${response.status}`)
+    }
 
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ""
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const blocks = buffer.split("\n\n")
+      buffer = blocks.pop() ?? ""
+
+      for (const block of blocks) {
+        const eventMatch = block.match(/^event: (.+)$/m)
+        const dataMatch = block.match(/^data: (.+)$/m)
+        if (!eventMatch || !dataMatch) continue
+
+        const eventType = eventMatch[1]
+        const data = JSON.parse(dataMatch[1])
+
+        if (eventType === "chunk") {
+          streamingText.value += data.text
+        } else if (eventType === "done") {
+          result.value = data
+          streamDone.value = true
+        } else if (eventType === "error") {
+          throw new Error(data.message)
+        }
+      }
+    }
+  } catch (e) {
+    result.value = {
+      score: answers.value.filter((a) => a >= 0).length,
+      total: questions.value.length,
+      result: {
+        careerDirection: "待确认",
+        strengths: [],
+        weaknesses: [],
+        recommendation: e instanceof Error ? e.message : "分析失败，请重试",
+        suggestedTopics: [],
+      },
+      aiGenerated: false,
+    }
+    streamDone.value = true
   } finally {
     submitting.value = false
   }
 }
+
+const streamingAnalysis = computed(() => {
+  const text = streamingText.value
+  const jsonStart = text.indexOf("```json")
+  if (jsonStart >= 0) {
+    return text.slice(0, jsonStart).trim()
+  }
+  const braceStart = text.indexOf("{")
+  if (braceStart >= 0) {
+    return text.slice(0, braceStart).trim()
+  }
+  return text.trim()
+})
 </script>
 
 <template>
@@ -76,7 +139,7 @@ async function submit() {
     <div v-if="loading" class="py-20 text-center text-muted">加载中…</div>
 
     <!-- 结果页 -->
-    <UCard v-else-if="result" class="max-w-2xl mx-auto">
+    <UCard v-else-if="result && streamDone" class="max-w-2xl mx-auto">
       <div class="text-center">
         <div class="mx-auto mb-4 flex size-16 items-center justify-center rounded-full bg-success-100">
           <UIcon name="i-lucide-check" class="text-3xl text-success" />
@@ -90,7 +153,7 @@ async function submit() {
           size="sm"
           class="mt-2"
         >
-          {{ result.model || "大模型" }} 解读
+          大模型解读
         </UBadge>
       </div>
       <div class="mt-6 space-y-4">
@@ -126,9 +189,6 @@ async function submit() {
         <div>
           <h3 class="font-medium">学习建议</h3>
           <p class="mt-1 text-sm text-muted">{{ result.result.recommendation }}</p>
-          <p v-if="!result.aiGenerated && result.degradedReason" class="mt-2 text-xs text-warning">
-            大模型调用失败：{{ result.degradedReason }}
-          </p>
         </div>
       </div>
       <template #footer>
@@ -138,6 +198,23 @@ async function submit() {
         </div>
       </template>
     </UCard>
+
+    <!-- 流式渲染中 -->
+    <div v-else-if="submitting" class="mx-auto max-w-2xl">
+      <div class="rounded-xl border border-default p-6">
+        <div class="mb-4 flex items-center gap-3">
+          <div class="size-3 animate-pulse rounded-full bg-primary" />
+          <span class="text-sm font-medium">大模型正在分析你的作答…</span>
+        </div>
+        <div v-if="streamingAnalysis" class="min-h-[120px] whitespace-pre-wrap text-sm leading-relaxed text-muted">
+          {{ streamingAnalysis }}<span class="animate-pulse text-primary">▌</span>
+        </div>
+        <div v-else class="py-8 text-center text-muted">
+          <UIcon name="i-lucide-brain" class="mx-auto mb-2 size-6 animate-pulse" />
+          <span class="text-sm">正在思考…</span>
+        </div>
+      </div>
+    </div>
 
     <!-- 答题页 -->
     <div v-else-if="questions.length > 0" class="mx-auto max-w-2xl">
@@ -179,7 +256,6 @@ async function submit() {
         <UButton
           v-else
           color="primary"
-          :loading="submitting"
           :disabled="answers[currentStep] === -1"
           label="提交测评"
           @click="submit"
