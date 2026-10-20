@@ -2,7 +2,7 @@
  * 整套学习资料的生成器。
  *
  * 一次请求要产出「一条路径上的全部关卡资料」，所以这里做三件事：
- * 1. 分块：每次只让模型写 3 个技能点，输出不会超长被截断；
+ * 1. 分块：每次只让模型写 2 个技能点，输出不会超长被截断；
  * 2. 限并发：块与块之间最多 2 路并行，避免触发限流；
  * 3. 严格失败：大模型是强依赖，任何一块没生成出来就整体报错，
  *    由接口层标记 failed 让用户重试——绝不拿模板冒充模型产出。
@@ -44,12 +44,12 @@ export interface GenerateContext {
 }
 
 /** 每次让模型写几个技能点 */
-const CHUNK_SIZE = 3
+const CHUNK_SIZE = 2
 /** 块间并发上限 */
 const CONCURRENCY = 2
 /** 整套资料的总时间预算，超了就降级，不让请求一直挂着 */
 export const DEFAULT_BUDGET_MS = 300_000
-/** 单块超时：一块写 3 篇，给足时间但别无限等 */
+/** 单块超时：一块写 2 篇，给足时间但别无限等 */
 const CHUNK_TIMEOUT_MS = 120_000
 
 const DIFFICULTIES = ["beginner", "intermediate", "advanced"] as const
@@ -72,7 +72,9 @@ function describeProfile(ctx: GenerateContext): string {
 function buildMessages(skills: PlanSkill[], ctx: GenerateContext) {
 	const list = skills
 		.map((skill, index) => {
-			const desc = skill.description ? `（${skill.description}）` : ""
+			const desc = skill.description?.trim()
+				? `（${skill.description}）`
+				: `（${skill.name}的核心概念与实操）`
 			return `${index + 1}. ${skill.name}｜分类：${skill.category}｜难度：${difficultyOf(skill.level)}${desc}`
 		})
 		.join("\n")
@@ -85,6 +87,7 @@ function buildMessages(skills: PlanSkill[], ctx: GenerateContext) {
 				"写作要求：多用短句，先讲清「这东西解决什么问题」，再给能照着做的步骤或示例（涉及代码就给可运行的代码）。",
 				"禁止空话套话（如「随着互联网的发展」），禁止写「以下是」「希望对你有帮助」。",
 				"只输出 JSON 对象，不要 Markdown 代码块包裹。",
+				"每个技能点的 content 必须不少于 400 字，否则视为不合格。",
 			].join("\n"),
 		},
 		{
@@ -97,7 +100,7 @@ function buildMessages(skills: PlanSkill[], ctx: GenerateContext) {
 				list,
 				"",
 				"输出格式：",
-				'{"materials":[{"index":1,"title":"关卡标题（12字内，动词开头）","summary":"一句话说明这关能干什么","objectives":["学完能做到的事","..."]}]}',
+				'{"materials":[{"index":1,"title":"关卡标题（12字内，动词开头）","summary":"一句话说明这关能干什么","objectives":["学完能做到的事","..."],"content":"Markdown正文","minutes":20,"difficulty":"beginner"}]}',
 				"",
 				"字段要求：",
 				"- index：对应上面的编号，从 1 开始",
@@ -108,6 +111,7 @@ function buildMessages(skills: PlanSkill[], ctx: GenerateContext) {
 				"- difficulty：beginner / intermediate / advanced 三选一",
 				"- content：Markdown 正文，依次包含四个二级标题：## 为什么学它、## 核心概念、## 动手做一遍、## 容易踩的坑",
 				"  正文 500~800 字；代码用 ``` 代码块，操作步骤用有序列表；不要出现一级标题，不要重复 title",
+				"  content 绝不能为空或过短，每个技能点都要写满四个章节。",
 			].join("\n"),
 		},
 	]
@@ -143,9 +147,14 @@ function validateChunk(value: unknown, skills: PlanSkill[]): PlanMaterial[] {
 			})
 		} catch (error) {
 			invalidCount += 1
+			const reason = error instanceof Error ? error.message : "unknown"
+			const contentPreview = typeof material.content === "string"
+				? `contentLen=${material.content.length}`
+				: `contentType=${typeof material.content}`
 			console.warn(
-				`[plan-generator] skill ${skill.id} (${skill.name}) validation failed:`
-				+ ` ${error instanceof Error ? error.message : "unknown"}`,
+				`[plan-generator] skill ${skill.id} (${skill.name}) validation failed: ${reason}`
+				+ ` ${contentPreview}`
+				+ ` keys=${Object.keys(material).join(",")}`,
 			)
 		}
 	}
@@ -257,13 +266,47 @@ export async function generatePlanMaterials(
 			return
 		}
 
+		/** 单个技能点单独生成：token 需求更小，整块失败或只回来一半时用它补齐 */
+		async function fillIndividually(targets: PlanSkill[]) {
+			for (const skill of targets) {
+				if (collected.has(skill.id)) continue
+				if (Date.now() - startedAt > budgetMs) break
+
+				try {
+					const single = await chatJson<PlanMaterial[]>({
+						messages: buildMessages([skill], ctx),
+						temperature: 0.5,
+						maxTokens: 8000,
+						timeoutMs: CHUNK_TIMEOUT_MS,
+						maxAttempts: 3,
+						tag: `plan:single:${skill.id}`,
+						validate: (value) => validateChunk(value, [skill]),
+						allowMockOnError: false,
+						mock: () => [],
+					})
+					if (!single.mock) {
+						model = single.model
+						for (const material of single.data) {
+							collected.set(material.skillId, material)
+						}
+					}
+				} catch (singleError) {
+					console.warn(
+						`[plan-generator] single retry failed skill=${skill.id} (${skill.name})`
+						+ ` error=${singleError instanceof Error ? singleError.message : "unknown"}`,
+					)
+				}
+			}
+		}
+
 		try {
 			const res = await chatJson<PlanMaterial[]>({
 				messages: buildMessages(chunk, ctx),
 				temperature: 0.5,
-				maxTokens: 8000,
+				// 思考型模型的推理 token 也算在 max_tokens 里，一块两篇至少给到 12000
+				maxTokens: 12000,
 				timeoutMs: CHUNK_TIMEOUT_MS,
-				maxAttempts: 2,
+				maxAttempts: 3,
 				tag: `plan:${chunk.map((s) => s.id).join(",")}`,
 				validate: (value) => validateChunk(value, chunk),
 				// 网络/限流失败必须抛出去，让整次生成明确失败，而不是悄悄写模板
@@ -279,9 +322,12 @@ export async function generatePlanMaterials(
 		} catch (error) {
 			console.warn(
 				`[plan-generator] chunk failed skills=${chunk.map((s) => s.id).join(",")}`
-				+ ` error=${error instanceof Error ? error.message : "unknown"}`,
+				+ ` error=${error instanceof Error ? error.message : "unknown"}, retrying individually`,
 			)
 		}
+
+		// 整块抛错、或者只回来一部分（validateChunk 允许部分成功）时，剩下的逐个补
+		await fillIndividually(chunk)
 	})
 
 	const materials: PlanMaterial[] = []

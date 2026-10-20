@@ -33,7 +33,7 @@ const form = reactive({
 		baseUrl: "",
 		apiKey: "",
 		model: "",
-		maxTokens: 4096,
+		maxTokens: 16384,
 	},
 })
 
@@ -443,7 +443,7 @@ async function onSubmit() {
 							</div>
 							<div>
 								<label class="mb-1 block text-sm">最大输出 Token</label>
-								<UInput v-model.number="form.llm.maxTokens" type="number" placeholder="4096" class="w-full" />
+								<UInput v-model.number="form.llm.maxTokens" type="number" :min="2048" placeholder="16384" class="w-full" />
 							</div>
 						</div>
 						<div class="flex items-center gap-3">

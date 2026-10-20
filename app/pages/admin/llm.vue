@@ -10,7 +10,7 @@ const form = reactive({
   baseUrl: "",
   apiKey: "",
   model: "",
-  maxTokens: 4096,
+  maxTokens: 16384,
 })
 
 const loading = ref(true)
@@ -264,11 +264,15 @@ function extractMessage(error: unknown): string {
             </div>
           </UFormField>
 
-          <UFormField label="最大输出 Token">
+          <UFormField
+            label="最大输出 Token"
+            help="含模型思考消耗；思考型模型（如 deepseek-flash、v4 系列）建议 16384 以上，太小会导致正文为空"
+          >
             <UInput
               v-model.number="form.maxTokens"
               type="number"
-              placeholder="4096"
+              :min="2048"
+              placeholder="16384"
               class="w-full"
             />
           </UFormField>

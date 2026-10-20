@@ -101,6 +101,7 @@ export default defineEventHandler(async (event): Promise<DirectionSelectResponse
 				name: pending.name,
 				category: direction.category,
 				level: pending.level,
+				description: `${pending.name}的基础知识与核心用法`,
 			})
 			if (seen.has(skillId)) continue
 			seen.add(skillId)

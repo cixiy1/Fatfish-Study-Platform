@@ -14,7 +14,7 @@ import {
 	updatePathGenerationStatus,
 } from "../../repositories/learning.repository"
 import { findUserByAccount } from "../../repositories/user.repository"
-import { LlmKeyUnreadableError, LlmNotConfiguredError } from "../../utils/llm"
+import { LlmKeyUnreadableError, LlmNotConfiguredError, LlmTruncatedError } from "../../utils/llm"
 import { describeLlmProblem, getLlmStatus, requireLlm } from "../../utils/llm-guard"
 import { PlanGenerationError, generatePlanMaterials, persistMaterials } from "../../utils/plan-generator"
 import { readSession } from "../../utils/session"
@@ -116,6 +116,8 @@ export default defineEventHandler(async (event) => {
 	let generated = 0
 	let fallback = 0
 	let degraded = false
+	/** 实际产出正文的模型名，落库后管理页能看到这条路径是谁写的 */
+	let usedModel: string | null = null
 
 	try {
 		if (wantContent && pending.length > 0) {
@@ -134,6 +136,7 @@ export default defineEventHandler(async (event) => {
 			generated = result.generated
 			fallback = result.fallback
 			degraded = result.degraded
+			usedModel = result.model
 
 			console.info(
 				`[path] generated path=${pathId} model=${result.model}`
@@ -155,7 +158,7 @@ export default defineEventHandler(async (event) => {
 			addLearningPathItem(pathId, skill.id, hit.id, order++, "lesson", hit.minutes)
 		}
 
-		updatePathGenerationStatus(pathId, degraded ? "degraded" : "ready")
+		updatePathGenerationStatus(pathId, degraded ? "degraded" : "ready", usedModel)
 
 		return {
 			ok: true,
@@ -176,6 +179,11 @@ export default defineEventHandler(async (event) => {
 		console.error(`[path] generate failed path=${pathId}`, error)
 
 		if (error instanceof PlanGenerationError) {
+			throw createError({ statusCode: 502, message: error.message })
+		}
+
+		// 配置层面的问题（输出上限太低），直接告诉用户怎么改，不要含糊成「生成失败」
+		if (error instanceof LlmTruncatedError) {
 			throw createError({ statusCode: 502, message: error.message })
 		}
 

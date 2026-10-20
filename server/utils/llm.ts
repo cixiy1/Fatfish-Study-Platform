@@ -71,8 +71,33 @@ export class LlmNotConfiguredError extends Error {
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000
-const DEFAULT_MAX_TOKENS = 1200
+const DEFAULT_MAX_TOKENS = 4096
+/**
+ * 输出 token 下限。
+ *
+ * 现在是思考型模型（deepseek-flash / v4 这类）当道：一次请求的 max_tokens 是
+ * 「思考 + 正文」的总和，光推理就能吃掉几千 token。业务侧按「正文大概多长」
+ * 传 900、1200 这种值，模型会把额度全用在推理上，返回 content 为空、
+ * finish_reason=length——表现就是「模型像没干活」。
+ * 所以这里给一个下限，业务传小了也会被抬到这个值（max_tokens 只是上限，不按量计费）。
+ */
+const MIN_OUTPUT_TOKENS = 4096
 const ANTHROPIC_VERSION = "2023-06-01"
+
+/** 模型输出被 max_tokens 截断（通常是思考型模型把额度用在了推理上） */
+export class LlmTruncatedError extends Error {
+	constructor(readonly maxTokens: number, readonly model: string) {
+		super(
+			`模型输出被截断：max_tokens=${maxTokens} 已被用尽（模型「${model}」是思考型模型，推理会先吃掉额度）。`
+			+ "请在「大模型配置」把输出上限调到 16384 以上再试",
+		)
+		this.name = "LlmTruncatedError"
+	}
+}
+
+function isTruncated(finishReason: string | null): boolean {
+	return finishReason === "length" || finishReason === "max_tokens"
+}
 
 function isAnthropicFormat(config: LlmConfig): boolean {
 	return config.apiFormat === "anthropic"
@@ -86,13 +111,19 @@ function resolveEndpoint(baseUrl: string, path: string): string {
 }
 
 interface OpenAiResponse {
-	choices?: { message?: { content?: string } }[]
+	choices?: { message?: { content?: string }, finish_reason?: string }[]
 	usage?: { prompt_tokens?: number, completion_tokens?: number }
 }
 
 interface AnthropicResponse {
 	content?: { type: string, text?: string }[]
+	stop_reason?: string
 	usage?: { input_tokens?: number, output_tokens?: number }
+}
+
+function readFinishReason(response: OpenAiResponse | AnthropicResponse, anthropic: boolean): string | null {
+	if (anthropic) return (response as AnthropicResponse).stop_reason ?? null
+	return (response as OpenAiResponse).choices?.[0]?.finish_reason ?? null
 }
 
 function readText(response: OpenAiResponse | AnthropicResponse, anthropic: boolean): string {
@@ -127,6 +158,8 @@ interface LlmRequest {
 	headers: Record<string, string>
 	body: Record<string, unknown>
 	anthropic: boolean
+	/** 本次请求实际生效的 max_tokens（截断报错时要用） */
+	maxTokens: number
 }
 
 /** 按协议拼出一次请求的端点 / 请求头 / 请求体 */
@@ -137,7 +170,11 @@ function buildRequest(
 ): LlmRequest {
 	const anthropic = isAnthropicFormat(config)
 	const endpoint = resolveEndpoint(config.baseUrl, anthropic ? "/messages" : "/chat/completions")
-	const maxTokens = Math.min(options.maxTokens ?? DEFAULT_MAX_TOKENS, config.maxTokens || DEFAULT_MAX_TOKENS)
+	// 上限取「后台配置」与「业务请求」的较小值，但不低于 MIN_OUTPUT_TOKENS：
+	// 思考型模型的推理 token 也算在 max_tokens 里，给太小等于必然空输出
+	const ceiling = config.maxTokens || DEFAULT_MAX_TOKENS
+	const requested = Math.max(options.maxTokens ?? DEFAULT_MAX_TOKENS, MIN_OUTPUT_TOKENS)
+	const maxTokens = Math.max(1, Math.min(requested, ceiling))
 	const temperature = options.temperature ?? 0.4
 
 	const systemMessage = messages.find((message) => message.role === "system")?.content ?? ""
@@ -170,10 +207,10 @@ function buildRequest(
 				authorization: `Bearer ${config.apiKey}`,
 			}
 
-	return { endpoint, headers, body, anthropic }
+	return { endpoint, headers, body, anthropic, maxTokens }
 }
 
-/** 发一次请求，把两种协议的返回统一成文本 + 用量 */
+/** 发一次请求，把两种协议的返回统一成文本 + 用量 + 结束原因 */
 async function sendRequest(request: LlmRequest, timeoutMs: number) {
 	const response = await $fetch<OpenAiResponse | AnthropicResponse>(request.endpoint, {
 		method: "POST",
@@ -187,6 +224,7 @@ async function sendRequest(request: LlmRequest, timeoutMs: number) {
 	return {
 		text: readText(response, request.anthropic),
 		usage: readUsage(response, request.anthropic),
+		finishReason: readFinishReason(response, request.anthropic),
 	}
 }
 
@@ -207,12 +245,23 @@ export async function probeLlm(
 	const startedAt = Date.now()
 	const request = buildRequest(config, [{ role: "user", content: prompt }], {
 		temperature: 0.1,
-		maxTokens: 64,
+		maxTokens: 512,
 	})
-	const { text, usage } = await sendRequest(request, 20_000)
+	const { text, usage, finishReason } = await sendRequest(request, 40_000)
 	const trimmed = text.trim()
 
-	if (!trimmed) throw new Error("模型返回了空内容，请确认模型名称是否有效")
+	// 思考型模型可能把额度全用在推理上、正文为空：只要确实消耗了 token 就算连通
+	if (!trimmed) {
+		if ((usage?.outputTokens ?? 0) > 0 || isTruncated(finishReason)) {
+			return {
+				text: "模型已连通（本次只输出了推理过程，未返回正文）",
+				model: config.model,
+				usage,
+				durationMs: Date.now() - startedAt,
+			}
+		}
+		throw new Error("模型返回了空内容，请确认模型名称是否有效")
+	}
 
 	return { text: trimmed.slice(0, 500), model: config.model, usage, durationMs: Date.now() - startedAt }
 }
@@ -258,18 +307,27 @@ export async function chat(options: ChatOptions): Promise<LlmResult> {
 	for (let attempt = 0; attempt <= retries; attempt++) {
 		const attemptStart = Date.now()
 		try {
-			const { text, usage } = await sendRequest(request, timeoutMs)
+			const { text, usage, finishReason } = await sendRequest(request, timeoutMs)
 			const durationMs = Date.now() - startedAt
 
 			console.info(
 				`[llm] ${tag} protocol=${request.anthropic ? "anthropic" : "openai"} model=${config.model}`
 				+ ` attempt=${attempt + 1} durationMs=${Date.now() - attemptStart}`
-				+ ` in=${usage?.inputTokens ?? 0} out=${usage?.outputTokens ?? 0} mock=false`,
+				+ ` in=${usage?.inputTokens ?? 0} out=${usage?.outputTokens ?? 0}`
+				+ ` maxTokens=${request.maxTokens} finish=${finishReason ?? "-"} mock=false`,
 			)
+
+			// 被截断时正文多半是空的或者半截 JSON，重试同一个上限没有意义，直接报清楚
+			if (isTruncated(finishReason)) {
+				throw new LlmTruncatedError(request.maxTokens, config.model)
+			}
 
 			return { text, model: config.model, mock: false, usage, durationMs }
 		} catch (error) {
 			lastError = error
+			// 上限不够属于配置问题，重试也不会变好
+			if (error instanceof LlmTruncatedError) break
+
 			const retryable = isRetryableError(error)
 			const durationMs = Date.now() - attemptStart
 			console.warn(
@@ -332,7 +390,7 @@ export async function chatJson<T>(options: ChatJsonOptions<T>): Promise<{ data: 
 			lastText = result.text
 			console.warn(
 				`[llm] ${options.tag ?? "json"} attempt=${attempt + 1} invalid json`
-				+ ` error=${error instanceof LlmFormatError ? error.message : "parse error"}`,
+				+ ` textLen=${result.text.length} error=${error instanceof LlmFormatError ? error.message : "parse error"}`,
 			)
 		}
 	}

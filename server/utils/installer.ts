@@ -94,7 +94,7 @@ function resolveLlmConfig(input: InstallLlmInput) {
 		baseUrl,
 		apiKey: input.apiKey,
 		model,
-		maxTokens: input.maxTokens ?? 8192,
+		maxTokens: input.maxTokens ?? 16384,
 	}
 }
 

@@ -82,7 +82,7 @@ function resolveLlmFields(input: Partial<LlmConfig> & { provider: LlmProvider })
 		baseUrl,
 		apiKey,
 		model,
-		maxTokens: input.maxTokens ?? 8192,
+		maxTokens: input.maxTokens ?? 16384,
 	}
 }
 

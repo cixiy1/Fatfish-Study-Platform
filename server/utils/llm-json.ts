@@ -44,22 +44,65 @@ export function backoffMs(attempt: number): number {
  * 从模型输出里抽 JSON。
  *
  * 模型经常在 JSON 前后加解释或 Markdown 围栏，不能直接 JSON.parse 整段。
+ *
+ * 注意：**不能**用「取第一个 ``` 之间的内容」这种写法。学习资料正文里本身就有
+ * ```html 示例代码块，一抓就抓到示例里去（里面还有 CSS 的 {}），
+ * 结果就是明明返回了合法 JSON，却报「JSON 解析失败 / 没有 JSON 对象」。
+ * 这里改成：只在整段被围栏包住时才剥壳，然后按括号配平切出第一个完整对象。
  */
 export function extractJson(text: string): unknown {
-	const source = text ?? ""
-	const fenced = source.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] ?? source
-	const start = fenced.indexOf("{")
-	const end = fenced.lastIndexOf("}")
+	const source = stripOuterFence((text ?? "").trim())
+	const start = source.indexOf("{")
+	if (start < 0) throw new LlmFormatError("响应中没有 JSON 对象")
 
-	if (start < 0 || end <= start) {
-		throw new LlmFormatError("响应中没有 JSON 对象")
-	}
+	const objectText = sliceBalancedObject(source, start)
+	if (!objectText) throw new LlmFormatError("JSON 对象不完整（可能被截断）")
 
 	try {
-		return JSON.parse(fenced.slice(start, end + 1)) as unknown
+		return JSON.parse(objectText) as unknown
 	} catch {
 		throw new LlmFormatError("JSON 解析失败")
 	}
+}
+
+/** 整段被 ``` 包住时才剥壳；没闭合（被截断）就只去掉开头那行 */
+function stripOuterFence(source: string): string {
+	if (!source.startsWith("```")) return source
+	const closed = source.match(/^```[a-zA-Z]*[^\S\n]*\n?([\s\S]*?)\n?```\s*$/)
+	if (closed) return closed[1].trim()
+	return source.replace(/^```[a-zA-Z]*[^\S\n]*\n?/, "").trim()
+}
+
+/**
+ * 从 start 处的 { 开始，按括号配平切出完整对象。
+ *
+ * 需要跳过字符串内容与转义，否则正文里的 `}`、`{`（代码示例、CSS）会算错层数。
+ * 没配平说明输出被截断，返回 null。
+ */
+function sliceBalancedObject(source: string, start: number): string | null {
+	let depth = 0
+	let inString = false
+	let escaped = false
+
+	for (let i = start; i < source.length; i++) {
+		const ch = source[i]
+
+		if (inString) {
+			if (escaped) escaped = false
+			else if (ch === "\\") escaped = true
+			else if (ch === '"') inString = false
+			continue
+		}
+
+		if (ch === '"') inString = true
+		else if (ch === "{") depth += 1
+		else if (ch === "}") {
+			depth -= 1
+			if (depth === 0) return source.slice(start, i + 1)
+		}
+	}
+
+	return null
 }
 
 /* -------------------------------------------------------------------------- */

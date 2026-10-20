@@ -28,7 +28,7 @@ export default defineEventHandler(async (event) => {
 		baseUrl: input.baseUrl || defaults?.baseUrl || "",
 		apiKey: input.apiKey.trim(),
 		model: input.model.trim(),
-		maxTokens: input.maxTokens ?? 4096,
+		maxTokens: input.maxTokens ?? 16384,
 	}
 
 	try {

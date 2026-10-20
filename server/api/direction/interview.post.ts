@@ -199,7 +199,8 @@ export default defineEventHandler(async (event): Promise<DirectionInterviewRespo
 			},
 		],
 		temperature: 0.5,
-		maxTokens: 900,
+		// 思考型模型光推理就要几千 token，给 900 会直接空输出
+		maxTokens: 6000,
 		timeoutMs: 15_000,
 		retries: 1,
 		maxAttempts: 2,

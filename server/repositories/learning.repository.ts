@@ -96,7 +96,7 @@ export function findSkillsByPosition(positionId: number): { id: number, name: st
 			FROM skills s
 			JOIN position_skills ps ON ps.skill_id = s.id
 			WHERE ps.position_id = ?
-			ORDER BY s.level, s.id
+			ORDER BY ps.sort_order, s.id
 		`)
 		.all(positionId) as { id: number, name: string, category: string, parent_id: number | null, level: number, description: string | null, required_level: number }[]
 }
