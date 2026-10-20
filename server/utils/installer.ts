@@ -73,7 +73,16 @@ function resolveSmtpConfig(input: InstallSmtpInput) {
 		secure = p.secure
 	}
 
-	return { preset, host, port, secure, user: input.user, pass: input.pass, from: input.from }
+	return {
+		preset,
+		host,
+		port,
+		secure,
+		user: input.user,
+		pass: input.pass,
+		// 留空就用登录账号：QQ/163 要求发件人与授权账号一致
+		from: (input.from ?? "").trim() || input.user,
+	}
 }
 
 /** 将安装向导的 LLM 输入转为完整配置 */

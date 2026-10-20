@@ -18,6 +18,37 @@ const showPassword = ref(false)
 const loading = ref(false)
 const message = ref("")
 
+// —— 补发验证邮件 ——
+const resendOpen = ref(false)
+const resendEmail = ref("")
+const resending = ref(false)
+const resendMessage = ref<{ type: "success" | "error", text: string } | null>(null)
+
+function openResend() {
+  resendEmail.value = ""
+  resendMessage.value = null
+  resendOpen.value = true
+}
+
+async function onResend() {
+  resending.value = true
+  resendMessage.value = null
+  try {
+    const res = await $fetch<{ sent: boolean, message: string }>("/api/auth/resend-verification", {
+      method: "POST",
+      body: { email: resendEmail.value },
+    })
+    resendMessage.value = { type: "success", text: res.message }
+    if (res.sent) {
+      resendOpen.value = false
+    }
+  } catch (error) {
+    resendMessage.value = { type: "error", text: errorMessage(error) }
+  } finally {
+    resending.value = false
+  }
+}
+
 const route = useRoute()
 const { login } = useAuthSession()
 
@@ -260,7 +291,49 @@ function errorMessage(error: unknown) {
             to="/register"
           />
         </p>
+
+        <p class="mt-3 text-center text-sm text-muted">
+          注册了但没收到验证邮件？
+          <UButton
+            type="button"
+            color="neutral"
+            variant="link"
+            size="sm"
+            label="补发验证邮件"
+            @click="openResend"
+          />
+        </p>
       </div>
     </section>
+
+    <UModal v-model:open="resendOpen" title="补发验证邮件">
+      <template #content>
+        <UForm class="space-y-4 p-6" @submit="onResend">
+          <h2 class="text-lg font-semibold">补发验证邮件</h2>
+
+          <UFormField label="注册邮箱" help="我们会向该邮箱重新发送一封验证邮件">
+            <UInput
+              v-model="resendEmail"
+              type="email"
+              placeholder="you@example.com"
+              autocomplete="email"
+              class="w-full"
+            />
+          </UFormField>
+
+          <UAlert
+            v-if="resendMessage"
+            :color="resendMessage.type === 'success' ? 'success' : 'error'"
+            variant="soft"
+            :title="resendMessage.text"
+          />
+
+          <div class="flex justify-end gap-3">
+            <UButton type="button" color="neutral" variant="ghost" @click="resendOpen = false">取消</UButton>
+            <UButton type="submit" :loading="resending" :disabled="!resendEmail">重新发送</UButton>
+          </div>
+        </UForm>
+      </template>
+    </UModal>
   </div>
 </template>

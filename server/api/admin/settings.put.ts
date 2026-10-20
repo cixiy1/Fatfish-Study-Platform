@@ -32,14 +32,18 @@ function resolveSmtpFields(input: Partial<SmtpConfig> & { preset: SmtpPreset }):
 		secure = p.secure
 	}
 
-	if (!input.user || !input.from) return null
+	const user = (input.user ?? "").trim()
+	if (!user) return null
+
+	// 发件人留空时直接用登录账号（QQ/163 要求两者一致，这样最省事）
+	const from = (input.from ?? "").trim() || user
 
 	// 密码：前端传 null/undefined 表示不改，从原配置读取
 	const existing = getSmtpConfig()
 	const pass = input.pass ?? existing?.pass ?? ""
 	if (!pass) return null
 
-	return { preset, host, port, secure, user: input.user, pass, from: input.from }
+	return { preset, host, port, secure, user, pass, from }
 }
 
 /** 合并 OAuth 凭证：前端传 null secret 表示不改，从原配置读取 */

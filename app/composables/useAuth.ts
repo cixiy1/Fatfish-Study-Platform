@@ -81,6 +81,10 @@ export function useAuthSession() {
 		return await $fetch<{
 			user: { account: string, name: string }
 			emailSent: boolean
+			/** 邮件发送失败时的具体原因（错误码 + 服务器响应 + 建议） */
+			emailError?: string | null
+			/** 验证链接（邮件失败时前端可直接展示给用户手动激活） */
+			verificationUrl?: string
 			message: string
 		}>("/api/auth/register", {
 			method: "POST",

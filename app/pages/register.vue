@@ -19,7 +19,10 @@ const form = reactive({
 const showPassword = ref(false)
 const loading = ref(false)
 const message = ref("")
+const messageDetail = ref("")
 const messageType = ref<"success" | "error">("error")
+const verifyUrl = ref("")
+const copied = ref(false)
 
 const { register } = useAuthSession()
 
@@ -60,22 +63,40 @@ function validate(state: typeof form) {
 async function onSubmit() {
   loading.value = true
   message.value = ""
+  messageDetail.value = ""
+  verifyUrl.value = ""
 
   try {
     const res = await register(form.account, form.email, form.password, form.name || undefined)
-    messageType.value = "success"
-    message.value = res.message
 
     if (res.emailSent) {
+      messageType.value = "success"
+      message.value = res.message
       await navigateTo("/login?registered=1", { replace: true })
-    } else {
-      await navigateTo("/login?registered=1", { replace: true })
+      return
     }
+
+    // 邮件没发出去：留在本页，展示真实原因 + 可直接点击的验证链接
+    messageType.value = "error"
+    message.value = res.message
+    messageDetail.value = res.emailError ?? ""
+    verifyUrl.value = res.verificationUrl ?? ""
   } catch (error) {
     messageType.value = "error"
     message.value = errorMessage(error)
   } finally {
     loading.value = false
+  }
+}
+
+async function copyVerifyUrl() {
+  if (!verifyUrl.value) return
+  try {
+    await navigator.clipboard.writeText(verifyUrl.value)
+    copied.value = true
+    setTimeout(() => { copied.value = false }, 2000)
+  } catch {
+    // 剪贴板不可用时退化为选中文本，用户自行复制
   }
 }
 
@@ -201,11 +222,33 @@ function errorMessage(error: unknown) {
 
           <LazyUAlert
             v-if="message"
-            :color="messageType === 'success' ? 'success' : 'neutral'"
+            :color="messageType === 'success' ? 'success' : 'error'"
             variant="soft"
             :title="message"
+            :description="messageDetail || undefined"
             role="status"
           />
+
+          <div v-if="verifyUrl" class="rounded-lg border border-default bg-muted/30 p-3">
+            <p class="text-xs text-muted">邮件发送失败，可点击下方链接直接完成激活（24 小时内有效）：</p>
+            <div class="mt-2 flex items-center gap-2">
+              <UButton
+                type="button"
+                size="sm"
+                label="激活我的账号"
+                :to="verifyUrl"
+                external
+              />
+              <UButton
+                type="button"
+                size="sm"
+                color="neutral"
+                variant="outline"
+                :label="copied ? '已复制' : '复制链接'"
+                @click="copyVerifyUrl"
+              />
+            </div>
+          </div>
 
           <UButton
             type="submit"

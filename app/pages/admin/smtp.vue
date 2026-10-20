@@ -17,9 +17,35 @@ const form = reactive({
 const loading = ref(true)
 const saving = ref(false)
 const testing = ref(false)
+const diagnosing = ref(false)
 const testTo = ref("")
 const message = ref<{ color: "success" | "error" | "warning", title: string, text?: string } | null>(null)
 const hasExistingPass = ref(false)
+
+interface DiagnoseStep {
+  name: string
+  ok: boolean
+  detail: string
+  durationMs: number
+  hint?: string
+}
+
+interface DiagnoseResult {
+  ok: boolean
+  summary: string
+  hint?: string
+  steps: DiagnoseStep[]
+  config: { fromAdjusted: boolean, effectiveFrom: string }
+}
+
+const diagnosis = ref<DiagnoseResult | null>(null)
+
+/** 发件人域名与登录账号不一致时给个提醒（QQ/163 会直接拒信） */
+const fromMismatch = computed(() => {
+  const userDomain = form.user.split("@")[1]?.trim().toLowerCase() ?? ""
+  const fromDomain = form.from.split("@")[1]?.trim().toLowerCase() ?? ""
+  return !!userDomain && !!fromDomain && userDomain !== fromDomain
+})
 
 const presetOptions = [
   { label: "Gmail", value: "gmail" },
@@ -109,6 +135,22 @@ async function onTest() {
   }
 }
 
+async function onDiagnose() {
+  message.value = null
+  diagnosis.value = null
+  diagnosing.value = true
+  try {
+    diagnosis.value = await $fetch<DiagnoseResult>("/api/admin/diagnose-smtp", {
+      method: "POST",
+      body: { to: testTo.value || undefined },
+    })
+  } catch (error) {
+    message.value = { color: "error", title: "诊断失败", text: extractMessage(error) }
+  } finally {
+    diagnosing.value = false
+  }
+}
+
 function extractMessage(error: unknown): string {
   const data = (error as { data?: { message?: string } })?.data
   return data?.message || "未知错误"
@@ -167,9 +209,13 @@ function extractMessage(error: unknown): string {
           />
         </UFormField>
 
-        <UFormField label="发件人邮箱">
-          <UInput v-model="form.from" type="email" placeholder="noreply@example.com" class="w-full" />
+        <UFormField label="发件人邮箱" help="留空则使用登录账号；QQ/163 必须与登录账号完全一致，否则会被拒信">
+          <UInput v-model="form.from" type="email" placeholder="留空即用登录账号" class="w-full" />
         </UFormField>
+
+        <p v-if="fromMismatch" class="rounded-lg bg-warning/10 px-3 py-2 text-xs text-warning">
+          发件人域名与登录账号不同，QQ/163 会直接拒信，发送时会自动回退为 {{ form.user || "登录账号" }}。
+        </p>
 
         <UFormField label="测试收件人邮箱" help="输入邮箱后点击下方按钮发送测试邮件">
           <UInput v-model="testTo" type="email" placeholder="you@example.com" class="w-full" />
@@ -182,9 +228,47 @@ function extractMessage(error: unknown): string {
           :description="message.text"
         />
 
-        <div class="flex gap-3">
+        <div class="flex flex-wrap gap-3">
           <UButton :loading="saving" @click="onSave">保存配置</UButton>
           <UButton variant="outline" :loading="testing" :disabled="!testTo" @click="onTest">发送测试邮件</UButton>
+          <UButton variant="ghost" color="neutral" :loading="diagnosing" @click="onDiagnose">
+            连接诊断
+          </UButton>
+        </div>
+
+        <div v-if="diagnosis" class="rounded-lg border border-default p-4">
+          <div class="mb-3 flex items-center gap-2">
+            <UIcon
+              :name="diagnosis.ok ? 'i-lucide-circle-check' : 'i-lucide-triangle-alert'"
+              class="size-4 shrink-0"
+              :class="diagnosis.ok ? 'text-success' : 'text-error'"
+            />
+            <p class="text-sm font-medium" :class="diagnosis.ok ? 'text-success' : 'text-error'">
+              {{ diagnosis.summary }}
+            </p>
+          </div>
+
+          <ol class="space-y-3">
+            <li v-for="step in diagnosis.steps" :key="step.name" class="flex gap-2.5">
+              <UIcon
+                :name="step.ok ? 'i-lucide-check' : 'i-lucide-x'"
+                class="mt-0.5 size-4 shrink-0"
+                :class="step.ok ? 'text-success' : 'text-error'"
+              />
+              <div class="min-w-0 flex-1">
+                <p class="text-sm">
+                  {{ step.name }}
+                  <span class="text-xs text-muted">· {{ step.durationMs }}ms</span>
+                </p>
+                <p class="mt-0.5 break-words text-xs text-muted">{{ step.detail }}</p>
+                <p v-if="step.hint" class="mt-1 break-words text-xs text-warning">{{ step.hint }}</p>
+              </div>
+            </li>
+          </ol>
+
+          <p v-if="diagnosis.config.fromAdjusted" class="mt-3 text-xs text-muted">
+            实际发件人已自动回退为 {{ diagnosis.config.effectiveFrom }}。
+          </p>
         </div>
       </div>
     </UCard>

@@ -33,6 +33,16 @@ export function findUserByEmail(email: string): UserRecord | null {
 	return (row as UserRecord | undefined) ?? null
 }
 
+/** 按账号或邮箱查找用户（登录用，二者皆可） */
+export function findUserByIdentifier(identifier: string): UserRecord | null {
+	const account = identifier.trim()
+	const email = account.toLowerCase()
+	const row = getDb()
+		.prepare("SELECT * FROM users WHERE account = ? OR email = ?")
+		.get(account, email) as UserRecord | undefined
+	return row ?? null
+}
+
 export function findUserById(id: number): UserRecord | null {
 	const row = getDb().prepare("SELECT * FROM users WHERE id = ?").get(id)
 	return (row as UserRecord | undefined) ?? null

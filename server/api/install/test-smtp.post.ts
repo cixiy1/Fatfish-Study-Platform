@@ -1,6 +1,6 @@
 import type { SmtpConfig } from "#shared/types/auth"
 import { isValidEmail } from "#shared/utils/validate"
-import { sendTestEmail } from "../../utils/email"
+import { describeSmtpError, sendTestEmail } from "../../utils/email"
 
 /**
  * 测试 SMTP 发送：POST /api/install/test-smtp
@@ -35,7 +35,12 @@ export default defineEventHandler(async (event) => {
 		await sendTestEmail(config, to, "FSP")
 		return { ok: true, message: `测试邮件已发送至 ${to}` }
 	} catch (error) {
-		const message = error instanceof Error ? error.message : "发送失败"
-		throw createError({ statusCode: 400, message: `SMTP 发送失败: ${message}` })
+		const failure = describeSmtpError(error)
+		console.error("[install] SMTP 测试失败:", failure.code, failure.detail)
+		throw createError({
+			statusCode: 400,
+			message: `SMTP 发送失败 [${failure.code}] ${failure.detail}｜${failure.hint}`,
+			data: failure,
+		})
 	}
 })

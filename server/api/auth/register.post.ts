@@ -5,7 +5,7 @@ import { isInstalled, readConfig, resolveSiteUrl } from "../../utils/app-config"
 import { hashPassword } from "../../utils/password"
 import { checkRateLimit } from "../../utils/rate-limit"
 import { getSmtpConfig } from "../../repositories/settings.repository"
-import { sendVerificationEmail } from "../../utils/email"
+import { describeSmtpError, sendVerificationEmail } from "../../utils/email"
 import {
 	createUser,
 	findUserByAccount,
@@ -86,6 +86,7 @@ export default defineEventHandler(async (event) => {
 	const smtpConfig = getSmtpConfig()
 	const siteName = readConfig()?.site.name ?? "FSP"
 	let emailSent = false
+	let emailError: string | null = null
 
 	if (!smtpConfig) {
 		updateUserStatus(user.id, "active")
@@ -101,21 +102,26 @@ export default defineEventHandler(async (event) => {
 	cleanExpiredByUser(user.id)
 	createToken({ userId: user.id, token, expiresAt })
 
+	// 验证链接始终返回给前端：邮件发送失败时，用户可复制链接手动激活
+	const siteUrl = resolveSiteUrl(event)
+	const verificationUrl = `${siteUrl}/api/auth/verify-email?token=${token}`
+
 	try {
-		const siteUrl = resolveSiteUrl(event)
-		const verificationUrl = `${siteUrl}/api/auth/verify-email?token=${token}`
 		await sendVerificationEmail(smtpConfig, email, verificationUrl, siteName)
 		emailSent = true
 	} catch (error) {
-		console.error("[register] 验证邮件发送失败:", error instanceof Error ? error.message : error)
-		emailSent = false
+		const failure = describeSmtpError(error)
+		emailError = `[${failure.code}] ${failure.detail}｜${failure.hint}`
+		console.error("[register] 验证邮件发送失败:", failure.code, failure.detail)
 	}
 
 	return {
 		user: { account: user.account, name: user.name },
 		emailSent,
+		emailError,
+		verificationUrl,
 		message: emailSent
 			? "注册成功，请查收验证邮件完成激活"
-			: "注册成功，但验证邮件发送失败，请联系管理员激活账号",
+			: "注册成功，但验证邮件发送失败，请点击下方链接完成激活",
 	}
 })

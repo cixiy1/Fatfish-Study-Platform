@@ -1,4 +1,4 @@
-import { findUserByAccount, touchLastLogin } from "../../repositories/user.repository"
+import { findUserByIdentifier, touchLastLogin } from "../../repositories/user.repository"
 import { findUserProfile, hasUsableLearningPath } from "../../repositories/learning.repository"
 import { isInstalled } from "../../utils/app-config"
 import { verifyPassword } from "../../utils/password"
@@ -29,7 +29,8 @@ export default defineEventHandler(async (event) => {
 		throw createError({ statusCode: 400, message: "账号和密码不能为空" })
 	}
 
-	const user = findUserByAccount(account)
+	// 账号或邮箱均可登录
+	const user = findUserByIdentifier(account)
 
 	// 账号不存在或密码错误 → 统一 401（防枚举）
 	if (!user || !verifyPassword(password, user.password_hash)) {

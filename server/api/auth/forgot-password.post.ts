@@ -3,7 +3,7 @@ import { isBlank, isValidEmail } from "#shared/utils/validate"
 import { isInstalled, readConfig, resolveSiteUrl } from "../../utils/app-config"
 import { checkRateLimit } from "../../utils/rate-limit"
 import { getSmtpConfig } from "../../repositories/settings.repository"
-import { sendPasswordResetEmail } from "../../utils/email"
+import { sendPasswordResetEmail, describeSmtpError } from "../../utils/email"
 import { findUserByEmail } from "../../repositories/user.repository"
 import {
 	cleanExpiredResetTokens,
@@ -63,7 +63,9 @@ export default defineEventHandler(async (event) => {
 			const resetUrl = `${siteUrl}/reset-password?token=${token}`
 			await sendPasswordResetEmail(smtpConfig, email, resetUrl, siteName)
 		} catch (error) {
-			console.error("[forgot-password] 重置邮件发送失败:", error instanceof Error ? error.message : error)
+			// 防枚举：对外仍返回同样的文案，只在服务端日志里留可排查的细节
+			const failure = describeSmtpError(error)
+			console.error("[forgot-password] 重置邮件发送失败:", failure.code, failure.detail, "|", failure.hint)
 		}
 	}
 
