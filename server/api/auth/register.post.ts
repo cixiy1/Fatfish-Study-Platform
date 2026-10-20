@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto"
 import type { RegisterPayload } from "#shared/types/auth"
 import { isBlank, isStrongPassword, isValidEmail } from "#shared/utils/validate"
-import { isInstalled, readConfig } from "../../utils/app-config"
+import { isInstalled, readConfig, resolveSiteUrl } from "../../utils/app-config"
 import { hashPassword } from "../../utils/password"
 import { checkRateLimit } from "../../utils/rate-limit"
 import { getSmtpConfig } from "../../repositories/settings.repository"
@@ -102,7 +102,7 @@ export default defineEventHandler(async (event) => {
 	createToken({ userId: user.id, token, expiresAt })
 
 	try {
-		const siteUrl = (readConfig()?.site.url ?? "").replace(/\/$/, "")
+		const siteUrl = resolveSiteUrl(event)
 		const verificationUrl = `${siteUrl}/api/auth/verify-email?token=${token}`
 		await sendVerificationEmail(smtpConfig, email, verificationUrl, siteName)
 		emailSent = true

@@ -24,6 +24,6 @@ export default defineEventHandler((event) => {
 		secure: !import.meta.dev,
 	})
 
-	const url = createGitHubAuthUrl(state)
+	const url = createGitHubAuthUrl(state, event)
 	return sendRedirect(event, url.toString(), 302)
 })

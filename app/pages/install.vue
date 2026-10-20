@@ -90,6 +90,34 @@ watch(() => form.llm.provider, (provider) => {
 	}
 })
 
+/** GitHub 里要登记的 Authorization callback URL，必须与站点地址完全一致 */
+const callbackUrl = computed(() => {
+	const base = form.site.url.trim().replace(/\/+$/, "")
+	return base ? `${base}/api/auth/github/callback` : ""
+})
+
+onMounted(() => {
+	// 站点地址默认填当前访问地址：留空会让 OAuth 回调拼不出来、邮件链接变成相对路径
+	if (!form.site.url && typeof window !== "undefined") {
+		form.site.url = window.location.origin
+	}
+})
+
+/** 校验站点地址，返回错误文案；合法或留空返回 null */
+function validateSiteUrl(raw: string): string | null {
+	const value = raw.trim()
+	if (!value) return null
+	try {
+		const parsed = new URL(value)
+		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+			return "站点地址必须以 http:// 或 https:// 开头"
+		}
+	} catch {
+		return "站点地址格式不正确，需形如 https://example.com（不要带路径）"
+	}
+	return null
+}
+
 function extractMessage(error: unknown): string {
 	if (!error || typeof error !== "object") return "未知错误"
 	const err = error as { message?: string, statusMessage?: string, data?: { message?: string } }
@@ -174,6 +202,13 @@ async function onSubmit() {
 		message.value = { color: "warning", title: "两次输入的密码不一致" }
 		return
 	}
+
+	const siteUrlError = validateSiteUrl(form.site.url)
+	if (siteUrlError) {
+		message.value = { color: "warning", title: siteUrlError }
+		return
+	}
+
 	const payload: InstallPayload = {
 		database: { file: form.database.file },
 		admin: {
@@ -182,7 +217,7 @@ async function onSubmit() {
 			name: form.admin.name || form.admin.account,
 			email: form.admin.email || undefined,
 		},
-		site: { name: form.site.name, url: form.site.url },
+		site: { name: form.site.name.trim(), url: form.site.url.trim().replace(/\/+$/, "") },
 	}
 
 	if (form.smtp.enabled) {
@@ -309,7 +344,7 @@ async function onSubmit() {
 							<label class="mb-1 block text-sm">站点地址</label>
 							<UInput v-model="form.site.url" placeholder="https://example.com" class="w-full" />
 							<p class="mt-1 text-xs text-neutral-500">
-								用于邮件验证链接与 OAuth 回调，务必填写正确。
+								用于邮件里的验证、重置链接与 GitHub 登录回调。已自动填入当前访问地址，部署到正式域名后再改。
 							</p>
 						</div>
 					</div>
@@ -383,9 +418,15 @@ async function onSubmit() {
 								<span class="font-medium">GitHub</span>
 								<USwitch v-model="form.oauth.github.enabled" />
 							</div>
-							<div v-if="form.oauth.github.enabled" class="grid gap-3 sm:grid-cols-2">
-								<UInput v-model="form.oauth.github.clientId" placeholder="Client ID" class="w-full" />
-								<UInput v-model="form.oauth.github.clientSecret" type="password" placeholder="Client Secret" class="w-full" />
+							<div v-if="form.oauth.github.enabled" class="space-y-3">
+								<div class="grid gap-3 sm:grid-cols-2">
+									<UInput v-model="form.oauth.github.clientId" placeholder="Client ID" class="w-full" />
+									<UInput v-model="form.oauth.github.clientSecret" type="password" placeholder="Client Secret" class="w-full" />
+								</div>
+								<p v-if="callbackUrl" class="text-xs text-neutral-500">
+									GitHub 应用的 Authorization callback URL 必须填：
+									<code class="break-all rounded bg-neutral-100 px-1 py-0.5 font-mono dark:bg-neutral-800">{{ callbackUrl }}</code>
+								</p>
 							</div>
 						</div>
 					</div>

@@ -5,6 +5,7 @@ import {
 	type AppConfig,
 	getDataDir,
 	isInstalled,
+	normalizeSiteUrl,
 	readConfig,
 	resolveDbFile,
 	writeConfig,
@@ -99,7 +100,7 @@ function resolveLlmConfig(input: InstallLlmInput) {
 }
 
 /** 执行安装；已安装时抛出 ALREADY_INSTALLED */
-export function runInstall(payload: InstallPayload): AppConfig {
+export function runInstall(payload: InstallPayload, fallbackSiteUrl?: string): AppConfig {
 	if (isInstalled()) {
 		throw new Error("ALREADY_INSTALLED")
 	}
@@ -140,7 +141,10 @@ export function runInstall(payload: InstallPayload): AppConfig {
 		installedAt: new Date().toISOString(),
 		site: {
 			name: payload.site?.name?.trim() || "FSP",
-			url: payload.site?.url?.trim() || "",
+			// 没填就用本次安装请求的来源兜底：站点地址一旦为空，OAuth 回调与邮件链接都会失效
+			url: payload.site?.url?.trim()
+				? normalizeSiteUrl(payload.site.url)
+				: normalizeSiteUrl(fallbackSiteUrl ?? ""),
 		},
 		database: { type: "sqlite", file: dbFile },
 		security: { sessionSecret },

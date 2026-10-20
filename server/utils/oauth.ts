@@ -1,6 +1,7 @@
 import { GitHub, generateState } from "arctic"
+import type { H3Event } from "h3"
 import type { OAuthPlatformCredentials } from "#shared/types/auth"
-import { readConfig } from "./app-config"
+import { resolveSiteUrl } from "./app-config"
 import { getOAuthConfig } from "../repositories/settings.repository"
 import { createOAuthUser, findUserByAccount, findUserByEmail, findUserById, findUserByOauth, linkOAuthAccount, activateUser, setEmailVerifiedAt, touchLastLogin } from "../repositories/user.repository"
 
@@ -25,18 +26,9 @@ export function generateOAuthState(): string {
 	return generateState()
 }
 
-/** 获取站点基础 URL（用于构建 redirect_uri） */
-function getSiteUrl(): string {
-	const url = readConfig()?.site.url
-	if (!url) {
-		throw new Error("站点 URL 未配置，请在管理员后台设置站点地址后再使用第三方登录")
-	}
-	return url.replace(/\/$/, "")
-}
-
-/** 构建 GitHub 回调 URL */
-export function getRedirectUri(): string {
-	return `${getSiteUrl()}/api/auth/github/callback`
+/** 构建 GitHub 回调 URL；站点地址未配置时用当前请求来源兜底 */
+export function getRedirectUri(event?: H3Event): string {
+	return `${resolveSiteUrl(event)}/api/auth/github/callback`
 }
 
 /** 读取 GitHub 凭证；未配置返回 null */
@@ -47,15 +39,15 @@ function getCredentials(): OAuthPlatformCredentials | null {
 }
 
 /** 创建 GitHub OAuth 客户端 */
-function createGitHubClient(): GitHub | null {
+function createGitHubClient(event?: H3Event): GitHub | null {
 	const creds = getCredentials()
 	if (!creds) return null
-	return new GitHub(creds.clientId, creds.clientSecret, getRedirectUri())
+	return new GitHub(creds.clientId, creds.clientSecret, getRedirectUri(event))
 }
 
 /** 生成 GitHub 授权 URL */
-export function createGitHubAuthUrl(state: string): URL {
-	const client = createGitHubClient()
+export function createGitHubAuthUrl(state: string, event?: H3Event): URL {
+	const client = createGitHubClient(event)
 	if (!client) throw new Error("GitHub 凭证未配置")
 	return client.createAuthorizationURL(state, ["user:email"])
 }
@@ -90,7 +82,7 @@ function explainTokenError(code: string, status: number, description?: string): 
  * GitHub 文档对「OAuth App」和「GitHub App」都明确支持请求体写法，
  * Basic 头只在 OAuth App 场景有保证，这样两种应用类型都能登。
  */
-async function exchangeCodeForToken(code: string): Promise<string> {
+async function exchangeCodeForToken(code: string, event?: H3Event): Promise<string> {
 	const creds = getCredentials()
 	if (!creds) throw new Error("GitHub 凭证未配置")
 
@@ -98,7 +90,7 @@ async function exchangeCodeForToken(code: string): Promise<string> {
 		client_id: creds.clientId,
 		client_secret: creds.clientSecret,
 		code,
-		redirect_uri: getRedirectUri(),
+		redirect_uri: getRedirectUri(event),
 	})
 
 	let res: Response
@@ -129,8 +121,8 @@ async function exchangeCodeForToken(code: string): Promise<string> {
 }
 
 /** 处理 GitHub 回调：交换 token → 拉取用户资料 */
-export async function handleGitHubCallback(code: string): Promise<OAuthUserResult> {
-	const accessToken = await exchangeCodeForToken(code)
+export async function handleGitHubCallback(code: string, event?: H3Event): Promise<OAuthUserResult> {
+	const accessToken = await exchangeCodeForToken(code, event)
 
 	// 拉取用户资料
 	const userRes = await fetch("https://api.github.com/user", {

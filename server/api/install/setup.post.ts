@@ -1,4 +1,5 @@
 import type { InstallPayload } from "#shared/types/install"
+import { getRequestURL } from "h3"
 import { validateInstallPayload } from "#shared/utils/validate-install"
 import { isInstalled } from "../../utils/app-config"
 import { runInstall } from "../../utils/installer"
@@ -26,7 +27,9 @@ export default defineEventHandler(async (event) => {
 	}
 
 	try {
-		const config = runInstall(body)
+		// 站点地址没填时用本次请求的来源兜底（反向代理下 X-Forwarded-* 由 h3 处理）
+		const requestUrl = getRequestURL(event)
+		const config = runInstall(body, `${requestUrl.protocol}//${requestUrl.host}`)
 		return { installed: true, installedAt: config.installedAt }
 	} catch (error) {
 		if (error instanceof Error && error.message === "ALREADY_INSTALLED") {

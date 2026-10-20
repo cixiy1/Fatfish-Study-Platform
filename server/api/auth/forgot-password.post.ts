@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto"
 import { isBlank, isValidEmail } from "#shared/utils/validate"
-import { isInstalled, readConfig } from "../../utils/app-config"
+import { isInstalled, readConfig, resolveSiteUrl } from "../../utils/app-config"
 import { checkRateLimit } from "../../utils/rate-limit"
 import { getSmtpConfig } from "../../repositories/settings.repository"
 import { sendPasswordResetEmail } from "../../utils/email"
@@ -59,7 +59,7 @@ export default defineEventHandler(async (event) => {
 
 		try {
 			const siteName = readConfig()?.site.name ?? "FSP"
-			const siteUrl = (readConfig()?.site.url ?? "").replace(/\/$/, "")
+			const siteUrl = resolveSiteUrl(event)
 			const resetUrl = `${siteUrl}/reset-password?token=${token}`
 			await sendPasswordResetEmail(smtpConfig, email, resetUrl, siteName)
 		} catch (error) {

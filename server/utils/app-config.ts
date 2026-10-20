@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, isAbsolute, resolve } from "node:path"
+import { getRequestURL, type H3Event } from "h3"
 
 /**
  * 应用配置持久化。
@@ -74,4 +75,49 @@ export function isInstalled(): boolean {
 export function resolveDbFile(config: AppConfig | null = readConfig()): string {
 	const file = config?.database.file ?? "fsp.db"
 	return isAbsolute(file) ? file : resolve(getDataDir(), file)
+}
+
+/** 去掉首尾空白与结尾斜杠，避免拼出 `//api/...` 这类地址 */
+export function normalizeSiteUrl(raw: string): string {
+	return raw.trim().replace(/\/+$/, "")
+}
+
+/**
+ * 解析站点对外地址，用于 OAuth 回调与邮件里的链接。
+ *
+ * 取址顺序：配置项 → 环境变量 FSP_SITE_URL → 当前请求的协议 + Host。
+ * 安装时若没填站点地址，就靠请求来源兜底，而不是直接报错让功能不可用。
+ */
+export function resolveSiteUrl(event?: H3Event): string {
+	const configured = readConfig()?.site.url
+	if (configured && configured.trim()) return normalizeSiteUrl(configured)
+
+	const fromEnv = process.env.FSP_SITE_URL
+	if (fromEnv && fromEnv.trim()) return normalizeSiteUrl(fromEnv)
+
+	if (event) {
+		const url = getRequestURL(event)
+		return `${url.protocol}//${url.host}`
+	}
+
+	throw new Error("站点地址未配置：请在管理后台填写站点地址")
+}
+
+/** 更新站点信息（名称 / 地址），地址允许清空，清空后回退到请求来源 */
+export function updateSiteConfig(patch: { name?: string, url?: string }): AppConfig {
+	const config = readConfig()
+	if (!config) throw new Error("NOT_INSTALLED")
+
+	const nextName = patch.name === undefined ? config.site.name : patch.name.trim()
+	const nextUrl = patch.url === undefined ? config.site.url : normalizeSiteUrl(patch.url)
+
+	const next: AppConfig = {
+		...config,
+		site: {
+			name: nextName || "FSP",
+			url: nextUrl,
+		},
+	}
+	writeConfig(next)
+	return next
 }

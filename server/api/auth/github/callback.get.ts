@@ -14,7 +14,7 @@ export default defineEventHandler(async (event) => {
 	}
 
 	try {
-		const result = await handleGitHubCallback(code)
+		const result = await handleGitHubCallback(code, event)
 		const sessionUser = await processOAuthUser(result)
 		setSession(event, sessionUser)
 		return sendRedirect(event, "/", 302)
