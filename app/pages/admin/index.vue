@@ -9,11 +9,15 @@ const settings = ref<AdminSettingsResponse | null>(null)
 const userCount = ref(0)
 const loading = ref(true)
 
+// 大模型就绪状态：settings 只能说明「填过」，能不能真调起来要看这里
+const { llmReady, llmReasonText, load: loadStatus } = useSystemStatus()
+
 onMounted(async () => {
   try {
     const [settingsData, countData] = await Promise.all([
       $fetch<AdminSettingsResponse>("/api/admin/settings"),
       $fetch<{ count: number }>("/api/admin/user-count"),
+      loadStatus(true),
     ])
     settings.value = settingsData
     userCount.value = countData.count
@@ -41,7 +45,28 @@ onMounted(async () => {
       加载中…
     </div>
 
-    <div v-else class="grid gap-6 md:grid-cols-2">
+    <template v-else>
+      <!-- 大模型是必填依赖：没配好时全站 AI 功能都不可用，必须先说清楚 -->
+      <div
+        v-if="!llmReady"
+        class="mb-6 rounded-xl border border-error/40 bg-error/5 p-4"
+      >
+        <div class="flex items-start gap-3">
+          <UIcon name="i-lucide-plug-zap" class="mt-0.5 size-5 shrink-0 text-error" />
+          <div class="min-w-0 flex-1">
+            <p class="font-medium text-error">
+              大模型接口未就绪，核心功能不可用
+            </p>
+            <p class="mt-1 text-sm text-muted">
+              {{ llmReasonText }}
+              学生端的方向访谈将被拦截，且无法生成关卡资料。
+            </p>
+          </div>
+          <UButton to="/admin/llm" size="sm" color="error" label="立即配置" />
+        </div>
+      </div>
+
+      <div class="grid gap-6 md:grid-cols-2">
       <UCard>
         <template #header>
           <div class="flex items-center justify-between">
@@ -78,10 +103,10 @@ onMounted(async () => {
           <div class="flex items-center justify-between">
             <h2 class="font-medium">OAuth 第三方登录</h2>
             <UBadge
-              :color="settings?.oauth?.github || settings?.oauth?.qq || settings?.oauth?.wechat ? 'success' : 'neutral'"
+              :color="settings?.oauth?.github ? 'success' : 'neutral'"
               variant="soft"
             >
-              {{ [settings?.oauth?.github, settings?.oauth?.qq, settings?.oauth?.wechat].filter(Boolean).length }} / 3 已配置
+              {{ settings?.oauth?.github ? '已配置' : '未配置' }}
             </UBadge>
           </div>
         </template>
@@ -90,18 +115,6 @@ onMounted(async () => {
             <span>GitHub</span>
             <UBadge :color="settings?.oauth?.github ? 'success' : 'neutral'" variant="soft" size="sm">
               {{ settings?.oauth?.github ? '已配置' : '未配置' }}
-            </UBadge>
-          </div>
-          <div class="flex items-center justify-between">
-            <span>QQ</span>
-            <UBadge :color="settings?.oauth?.qq ? 'success' : 'neutral'" variant="soft" size="sm">
-              {{ settings?.oauth?.qq ? '已配置' : '未配置' }}
-            </UBadge>
-          </div>
-          <div class="flex items-center justify-between">
-            <span>微信</span>
-            <UBadge :color="settings?.oauth?.wechat ? 'success' : 'neutral'" variant="soft" size="sm">
-              {{ settings?.oauth?.wechat ? '已配置' : '未配置' }}
             </UBadge>
           </div>
         </div>
@@ -114,8 +127,8 @@ onMounted(async () => {
         <template #header>
           <div class="flex items-center justify-between">
             <h2 class="font-medium">大模型 AI 接口</h2>
-            <UBadge :color="settings?.llm ? 'success' : 'neutral'" variant="soft">
-              {{ settings?.llm ? '已配置' : '未配置' }}
+            <UBadge :color="llmReady ? 'success' : 'error'" variant="soft">
+              {{ llmReady ? '已就绪' : '未配置（必填）' }}
             </UBadge>
           </div>
         </template>
@@ -134,7 +147,7 @@ onMounted(async () => {
           </div>
         </div>
         <p v-else class="text-sm text-muted">
-          尚未配置大模型，智能答疑等功能将使用关键词匹配。
+          尚未配置大模型（必填）。学生无法完成方向访谈，也无法生成关卡资料。
         </p>
         <template #footer>
           <UButton to="/admin/llm" variant="soft" label="配置大模型" block />
@@ -155,6 +168,7 @@ onMounted(async () => {
           <UButton to="/admin/users" variant="soft" label="用户管理" block />
         </template>
       </UCard>
-    </div>
+      </div>
+    </template>
   </UContainer>
 </template>

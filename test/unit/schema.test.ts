@@ -7,7 +7,7 @@ describe("schema migrate", () => {
 		const db = new Database(":memory:")
 		migrate(db)
 
-		expect(currentVersion(db)).toBe(5)
+		expect(currentVersion(db)).toBe(6)
 
 		const tables = db
 			.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -19,6 +19,7 @@ describe("schema migrate", () => {
 		expect(names).toContain("schema_migrations")
 		expect(names).toContain("email_verification_tokens")
 		expect(names).toContain("password_reset_tokens")
+		expect(names).toContain("mastery_checks")
 
 		db.close()
 	})
@@ -28,10 +29,10 @@ describe("schema migrate", () => {
 		migrate(db)
 		migrate(db)
 
-		expect(currentVersion(db)).toBe(5)
+		expect(currentVersion(db)).toBe(6)
 
 		const count = db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }
-		expect(count.count).toBe(5)
+		expect(count.count).toBe(6)
 
 		db.close()
 	})
@@ -105,6 +106,32 @@ describe("schema migrate", () => {
 		const indexNames = indexes.map((idx) => idx.name)
 		expect(indexNames).toContain("idx_email_ver_tokens_token")
 		expect(indexNames).toContain("idx_email_ver_tokens_user")
+
+		db.close()
+	})
+
+	it("v6 迁移新增 AI 生成字段与 mastery_checks 表", () => {
+		const db = new Database(":memory:")
+		migrate(db)
+
+		const cols = (table: string) =>
+			(db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((col) => col.name)
+
+		expect(cols("positions")).toEqual(
+			expect.arrayContaining(["owner_user_id", "source", "status", "generated_at"]),
+		)
+		expect(cols("learning_resources")).toEqual(
+			expect.arrayContaining(["content", "summary", "objectives", "source", "status", "generated_at", "model"]),
+		)
+		expect(cols("learning_paths")).toEqual(
+			expect.arrayContaining(["generation_status", "model", "generated_at", "error_message"]),
+		)
+		expect(cols("learning_path_items")).toEqual(
+			expect.arrayContaining(["item_type", "estimated_minutes"]),
+		)
+		expect(cols("mastery_checks")).toEqual(
+			expect.arrayContaining(["questions", "answers", "score", "result_data", "status"]),
+		)
 
 		db.close()
 	})

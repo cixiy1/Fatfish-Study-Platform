@@ -1,7 +1,6 @@
 <script setup lang="ts">
-definePageMeta({ layout: 'learning' })
 
-useHead({ title: "职业测评 · FSP" })
+useHead({ title: "能力测评 · FSP" })
 
 interface Question {
   id: number
@@ -57,8 +56,8 @@ async function submit() {
 <template>
   <UContainer class="py-10">
     <div class="mb-8">
-      <h1 class="text-2xl font-semibold tracking-tight">职业能力摸底测评</h1>
-      <p class="mt-1 text-sm text-muted">完成测评后生成你的初始用户画像与职业方向</p>
+      <h1 class="text-2xl font-semibold tracking-tight">基础能力测评</h1>
+      <p class="mt-1 text-sm text-muted">完成测评后生成初始画像与推荐方向</p>
     </div>
 
     <div v-if="loading" class="py-20 text-center text-muted">加载中…</div>
@@ -74,7 +73,7 @@ async function submit() {
       </div>
       <div class="mt-6 space-y-4">
         <div>
-          <h3 class="font-medium">推荐职业方向</h3>
+          <h3 class="font-medium">推荐方向</h3>
           <UBadge color="primary" variant="soft" class="mt-1">{{ result.result.careerDirection }}</UBadge>
         </div>
         <div>
@@ -90,7 +89,7 @@ async function submit() {
       </div>
       <template #footer>
         <div class="flex gap-3">
-          <UButton to="/positions" label="查看岗位技能" />
+          <UButton to="/positions" label="查看技能图谱" />
           <UButton to="/" variant="soft" label="返回首页" />
         </div>
       </template>
@@ -109,7 +108,7 @@ async function submit() {
             v-for="(opt, i) in questions[currentStep].options"
             :key="i"
             class="flex w-full items-center gap-3 rounded-lg border p-3 text-left transition hover:bg-elevated"
-            :class="answers[currentStep] === i ? 'border-primary bg-primary-50' : 'border-default'"
+            :class="answers[currentStep] === i ? 'border-primary bg-primary/10' : 'border-default'"
             @click="answers[currentStep] = i"
           >
             <div class="flex size-6 items-center justify-center rounded-full border" :class="answers[currentStep] === i ? 'border-primary bg-primary text-white' : ''">

@@ -1,5 +1,5 @@
 import { isInstalled } from "../../utils/app-config"
-import { createAuthUrl, generateOAuthState, isProviderConfigured } from "../../utils/oauth"
+import { createGitHubAuthUrl, generateOAuthState, isGitHubConfigured } from "../../utils/oauth"
 
 /**
  * GitHub OAuth 发起：GET /api/auth/github
@@ -11,7 +11,7 @@ export default defineEventHandler((event) => {
 		throw createError({ statusCode: 503, message: "系统尚未安装，请先访问 /install 完成初始化" })
 	}
 
-	if (!isProviderConfigured("github")) {
+	if (!isGitHubConfigured()) {
 		throw createError({ statusCode: 501, message: "GitHub 登录尚未配置" })
 	}
 
@@ -24,6 +24,6 @@ export default defineEventHandler((event) => {
 		secure: !import.meta.dev,
 	})
 
-	const url = createAuthUrl("github", state)
+	const url = createGitHubAuthUrl(state)
 	return sendRedirect(event, url.toString(), 302)
 })

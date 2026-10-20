@@ -19,6 +19,12 @@ const testPrompt = ref("")
 const message = ref<{ color: "success" | "error" | "warning", title: string, text?: string } | null>(null)
 const testResult = ref<{ color: "success" | "error", title: string, text?: string } | null>(null)
 const hasExistingKey = ref(false)
+const { status, load: loadStatus } = useSystemStatus()
+
+/** 保存后要立刻刷新全局状态，否则其他页面还认为「没配置」 */
+async function refreshStatus() {
+  await loadStatus(true)
+}
 
 const providerOptions = [
   { label: "OpenAI", value: "openai" },
@@ -58,6 +64,8 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+
+  await loadStatus(true)
 })
 
 async function onSave() {
@@ -79,6 +87,7 @@ async function onSave() {
     message.value = { color: "success", title: "大模型配置已保存" }
     hasExistingKey.value = true
     form.apiKey = ""
+    await refreshStatus()
   } catch (error) {
     message.value = { color: "error", title: "保存失败", text: extractMessage(error) }
   } finally {
@@ -104,18 +113,20 @@ async function onTest() {
 
 async function onClear() {
   message.value = null
+  if (!window.confirm("清除后，AI 访谈、方向推荐与关卡资料生成将立即停用。确定清除？")) return
   try {
     await $fetch("/api/admin/settings", {
       method: "PUT",
       body: { llm: null },
     })
-    message.value = { color: "success", title: "已清除大模型配置" }
+    message.value = { color: "warning", title: "已清除大模型配置", text: "平台 AI 功能已停用，学生无法生成学习计划。" }
     hasExistingKey.value = false
     form.apiKey = ""
     const d = LLM_PROVIDER_DEFAULTS.openai
     form.provider = "openai"
     form.baseUrl = d.baseUrl
     form.model = d.model
+    await refreshStatus()
   } catch (error) {
     message.value = { color: "error", title: "清除失败", text: extractMessage(error) }
   }
@@ -132,12 +143,25 @@ function extractMessage(error: unknown): string {
     <div class="mb-6 flex items-center gap-4">
       <UButton to="/admin" variant="ghost" icon="i-lucide-arrow-left" label="返回" />
       <h1 class="text-xl font-semibold">大模型 AI 接口配置</h1>
+      <UBadge color="error" variant="soft" size="sm">必填</UBadge>
     </div>
 
     <UCard class="mx-auto max-w-2xl">
       <div v-if="loading" class="py-12 text-center text-muted">加载中…</div>
 
       <div v-else class="space-y-6">
+        <div
+          v-if="status && !status.llm.ready"
+          class="rounded-lg bg-error/10 px-3 py-2.5 text-sm text-error"
+        >
+          <p class="font-medium">
+            当前未就绪，AI 功能已停用
+          </p>
+          <p class="mt-1 text-error/80">
+            学生端方向访谈将被拦截，且无法生成关卡资料。填写下方配置并发送一次测试请求即可恢复。
+          </p>
+        </div>
+
         <UFormField label="提供商">
           <USelect
             v-model="form.provider"

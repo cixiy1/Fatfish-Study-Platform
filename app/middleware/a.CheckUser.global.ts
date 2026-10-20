@@ -3,11 +3,9 @@ import { GUEST_ONLY_PATHS, safeRedirect } from "~/utils/auth"
 /**
  * 全局登录检查，按文件名排序最先执行。
  *
- * 默认策略：**放行**（内容站常见做法）。受保护页面在页面内声明：
- *   definePageMeta({ auth: true })
- *
- * 如果以后要做后台型站点（默认全拦、白名单放行），把下面这个常量改成 true 即可，
- * 页面里仍可用 definePageMeta({ auth: false }) 单独开口子。
+ * 默认策略：**全站拦截**（演示需要登录态，避免评委看到空数据页）。
+ * 公开页面在页面内声明：definePageMeta({ auth: false })，
+ * 或在 utils/auth.ts 的 GUEST_ONLY_PATHS 里登记。
  */
 const DEFAULT_REQUIRE_AUTH = true
 
@@ -49,10 +47,14 @@ export default defineNuxtRouteMiddleware(async (to) => {
 		})
 	}
 
-	// 已登录但尚未选择学习方向 → 仅对依赖学习路径的页面跳转到 onboarding
-	// assessment/positions/account 等页面不强制，用户可自由浏览
-	const REQUIRES_LEARNING_PATH = ["/learning", "/qa", "/reports"]
-	if (loggedIn && !user?.has_learning_path && REQUIRES_LEARNING_PATH.some((p) => to.path.startsWith(p))) {
+	// 已登录但尚未制定学习计划 → 主线页面统一挡回计划引导
+	// 注意：`/` 必须单独判断，不能塞进 startsWith 列表——startsWith("/") 会命中所有路径。
+	const REQUIRES_LEARNING_PATH = ["/learning", "/learn", "/qa", "/reports", "/assessment", "/plan"]
+
+	const needsLearningPath =
+		to.path === "/" || REQUIRES_LEARNING_PATH.some((p) => to.path.startsWith(p))
+
+	if (loggedIn && !user?.has_learning_path && needsLearningPath) {
 		return navigateTo("/onboarding", { replace: true })
 	}
 })

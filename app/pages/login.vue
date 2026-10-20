@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { safeRedirect } from "~/utils/auth"
 
+definePageMeta({ layout: "blank" })
+
 useHead({
   title: "登录 · FSP",
   meta: [{ name: "robots", content: "noindex" }],
@@ -22,7 +24,7 @@ const { login } = useAuthSession()
 // 被中间件拦下来时带的回跳地址，登录成功后原路返回
 const redirectTo = computed(() => safeRedirect(route.query.redirect))
 
-// URL 参数提示（注册成功 / 邮箱验证结果）
+// URL 参数提示（注册成功 / 邮箱验证结果 / 第三方登录失败）
 const urlAlert = computed<{ color: "success" | "error", text: string } | null>(() => {
   if (route.query.registered === "1") {
     return { color: "success", text: "注册成功，请登录" }
@@ -32,13 +34,33 @@ const urlAlert = computed<{ color: "success" | "error", text: string } | null>((
     token_used: "验证链接已使用，请直接登录",
     token_expired: "验证链接已过期，请重新注册或联系管理员",
     user_not_found: "用户不存在",
+    oauth_state: "登录状态校验失败（链接过期或跨站），请重新发起登录",
   }
   const err = route.query.error as string | undefined
-  if (err && errorMap[err]) {
+  if (!err) return null
+
+  // 第三方平台回传的具体原因优先展示，便于定位是回调域没配还是扫码被拒
+  const reason = typeof route.query.msg === "string" ? route.query.msg : ""
+  if (err === "oauth_failed") {
+    return { color: "error", text: reason || "第三方登录失败，请重试或改用账号密码登录" }
+  }
+  if (errorMap[err]) {
     return { color: "error", text: errorMap[err] }
   }
   return null
 })
+
+interface ProviderFlags {
+  github: boolean
+}
+
+// 游客页也要能读，服务端直接取，失败就当没配
+const { data: providers } = await useAsyncData<ProviderFlags | null>("auth-providers", () =>
+  $fetch<ProviderFlags>("/api/auth/providers").catch(() => null),
+)
+
+/** 只在真配了 GitHub 凭证时才显示第三方登录按钮 */
+const githubEnabled = computed(() => providers.value?.github === true)
 
 function validate(state: typeof form) {
   const errors: { name: string; message: string }[] = []
@@ -91,33 +113,35 @@ function errorMessage(error: unknown) {
       <div
         class="relative flex items-center gap-2.5 text-sm font-semibold tracking-wide"
       >
-        <span
-          class="grid size-9 place-items-center rounded-lg bg-teal-400 text-sm font-bold text-teal-950"
+        <img
+          src="/logo-128.png"
+          alt=""
+          width="36"
+          height="36"
+          class="size-9 rounded-lg object-cover ring-1 ring-white/15"
         >
-          F
-        </span>
         FSP
       </div>
 
       <div class="relative max-w-sm">
         <p class="text-3xl font-semibold leading-snug tracking-tight">
-          内容，从一篇文章开始
+          任何主题，一条可执行的路径
         </p>
         <p class="mt-4 text-sm leading-relaxed text-slate-400">
-          Markdown 驱动，组件可复用，一条命令部署。
+          AI 访谈确认目标与基础，生成技能点、关卡路径与配套资料。
         </p>
         <ul class="mt-8 space-y-3 text-sm text-slate-300">
           <li class="flex items-center gap-2.5">
             <span class="size-1.5 rounded-full bg-teal-400" />
-            内容与代码同仓管理
+            按目标拆解技能点与关卡
           </li>
           <li class="flex items-center gap-2.5">
             <span class="size-1.5 rounded-full bg-teal-400" />
-            MDC 语法嵌入 Vue 组件
+            每关配套讲解与练习
           </li>
           <li class="flex items-center gap-2.5">
             <span class="size-1.5 rounded-full bg-teal-400" />
-            SSR 与静态生成双通道
+            学习记录与测评结果留档
           </li>
         </ul>
       </div>
@@ -132,7 +156,7 @@ function errorMessage(error: unknown) {
           {{
             redirectTo
               ? `登录后继续访问 ${redirectTo}`
-              : "使用账号继续，或先浏览公开内容。"
+              : "登录后继续学习。"
           }}
         </p>
 
@@ -211,9 +235,9 @@ function errorMessage(error: unknown) {
           />
         </UForm>
 
-        <USeparator label="或" class="my-6" />
+        <template v-if="githubEnabled">
+          <USeparator label="或" class="my-6" />
 
-        <div class="grid grid-cols-3 gap-3">
           <UButton
             color="neutral"
             variant="outline"
@@ -221,30 +245,10 @@ function errorMessage(error: unknown) {
             block
             to="/api/auth/github"
             external
-          >
-            GitHub
-          </UButton>
-          <UButton
-            color="neutral"
-            variant="outline"
-            size="lg"
-            block
-            to="/api/auth/qq"
-            external
-          >
-            QQ
-          </UButton>
-          <UButton
-            color="neutral"
-            variant="outline"
-            size="lg"
-            block
-            to="/api/auth/wechat"
-            external
-          >
-            微信
-          </UButton>
-        </div>
+            icon="i-lucide-github"
+            label="使用 GitHub 登录"
+          />
+        </template>
 
         <p class="mt-6 text-center text-sm text-muted">
           还没有账号？

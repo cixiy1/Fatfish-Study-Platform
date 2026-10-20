@@ -49,7 +49,8 @@ function analyzeCareer(questions: { category: string | null }[], answers: number
 
 	questions.forEach((q, i) => {
 		const ans = answers[i]
-		if (q.category === "职业意向" && ans >= 0 && ans < 4) {
+		// 「方向偏好」是当前题库的分类；「职业意向」用于兼容早期数据
+		if ((q.category === "方向偏好" || q.category === "职业意向") && ans >= 0 && ans < 4) {
 			directionScores[ans] += 2
 		}
 		if (q.category === "基础水平" && ans >= 2) {
@@ -68,7 +69,7 @@ function analyzeCareer(questions: { category: string | null }[], answers: number
 	return {
 		careerDirection,
 		strengths,
-		weaknesses: ["需要通过后续学习补强"],
-		recommendation: `建议以 ${careerDirection} 方向为重点，系统化学习相关技能`,
+		weaknesses: ["需在后续关卡中补强"],
+		recommendation: `建议优先选择「${careerDirection}」方向，按关卡顺序系统学习。`,
 	}
 }

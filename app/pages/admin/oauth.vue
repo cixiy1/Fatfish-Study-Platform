@@ -1,22 +1,16 @@
 <script setup lang="ts">
 useHead({ title: "OAuth 配置 · 管理后台 · FSP" })
 
-interface PlatformForm {
+interface GitHubForm {
   clientId: string
   clientSecret: string
   hasSecret: boolean
 }
 
-const platforms = [
-  { key: "github" as const, label: "GitHub", hint: "在 GitHub Settings → Developer settings → OAuth Apps 创建" },
-  { key: "qq" as const, label: "QQ 互联", hint: "在 QQ 互联官网创建应用，回调地址需配置" },
-  { key: "wechat" as const, label: "微信开放平台", hint: "在微信开放平台创建网站应用" },
-]
-
-const forms = reactive<Record<string, PlatformForm>>({
-  github: { clientId: "", clientSecret: "", hasSecret: false },
-  qq: { clientId: "", clientSecret: "", hasSecret: false },
-  wechat: { clientId: "", clientSecret: "", hasSecret: false },
+const form = reactive<GitHubForm>({
+  clientId: "",
+  clientSecret: "",
+  hasSecret: false,
 })
 
 const loading = ref(true)
@@ -28,17 +22,13 @@ onMounted(async () => {
     const settings = await $fetch<{
       oauth: {
         github?: { clientId: string, clientSecret: string | null }
-        qq?: { clientId: string, clientSecret: string | null }
-        wechat?: { clientId: string, clientSecret: string | null }
       }
     }>("/api/admin/settings")
 
-    for (const p of platforms) {
-      const creds = settings.oauth?.[p.key]
-      if (creds) {
-        forms[p.key].clientId = creds.clientId
-        forms[p.key].hasSecret = creds.clientSecret === null
-      }
+    const creds = settings.oauth?.github
+    if (creds) {
+      form.clientId = creds.clientId
+      form.hasSecret = creds.clientSecret === null
     }
   } catch {
     message.value = { color: "error", title: "加载配置失败" }
@@ -51,28 +41,22 @@ async function onSave() {
   message.value = null
   saving.value = true
   try {
-    const oauth: Record<string, { clientId: string, clientSecret: string | null }> = {}
-    for (const p of platforms) {
-      const f = forms[p.key]
-      if (f.clientId) {
-        oauth[p.key] = {
-          clientId: f.clientId,
-          clientSecret: f.clientSecret || null,
-        }
-      }
-    }
-
     await $fetch("/api/admin/settings", {
       method: "PUT",
-      body: { oauth },
+      body: {
+        oauth: {
+          github: {
+            clientId: form.clientId,
+            clientSecret: form.clientSecret || null,
+          },
+        },
+      },
     })
 
     message.value = { color: "success", title: "OAuth 配置已保存" }
-    for (const p of platforms) {
-      if (forms[p.key].clientSecret) {
-        forms[p.key].hasSecret = true
-        forms[p.key].clientSecret = ""
-      }
+    if (form.clientSecret) {
+      form.hasSecret = true
+      form.clientSecret = ""
     }
   } catch (error) {
     message.value = { color: "error", title: "保存失败", text: extractMessage(error) }
@@ -100,30 +84,34 @@ function extractMessage(error: unknown): string {
       </div>
 
       <div v-else class="space-y-8">
-        <div v-for="p in platforms" :key="p.key" class="space-y-4">
+        <div class="space-y-4">
           <div>
-            <h3 class="font-medium">{{ p.label }}</h3>
-            <p class="mt-1 text-xs text-muted">{{ p.hint }}</p>
+            <h3 class="font-medium">GitHub</h3>
+            <p class="mt-1 text-xs text-muted">
+              推荐用 OAuth App：GitHub Settings → Developer settings → OAuth Apps → New OAuth App，
+              Authorization callback URL 填
+              <code class="rounded bg-elevated px-1 py-0.5">https://你的域名/api/auth/github/callback</code>。
+              用 GitHub App 也可以，但要额外在 Account permissions 里勾
+              <strong>Email addresses: Read-only</strong>，否则拿不到邮箱。
+            </p>
           </div>
 
-          <UFormField label="Client ID / App ID">
+          <UFormField label="Client ID">
             <UInput
-              v-model="forms[p.key].clientId"
-              placeholder="应用 Client ID"
+              v-model="form.clientId"
+              placeholder="OAuth App 的 Client ID"
               class="w-full"
             />
           </UFormField>
 
-          <UFormField :label="forms[p.key].hasSecret ? 'Client Secret（留空则不修改）' : 'Client Secret / App Secret'">
+          <UFormField :label="form.hasSecret ? 'Client Secret（留空则不修改）' : 'Client Secret'">
             <UInput
-              v-model="forms[p.key].clientSecret"
+              v-model="form.clientSecret"
               type="password"
-              :placeholder="forms[p.key].hasSecret ? '已设置，留空不修改' : '请输入 Secret'"
+              :placeholder="form.hasSecret ? '已设置，留空不修改' : '请输入 Client Secret'"
               class="w-full"
             />
           </UFormField>
-
-          <USeparator v-if="p.key !== 'wechat'" />
         </div>
 
         <UAlert

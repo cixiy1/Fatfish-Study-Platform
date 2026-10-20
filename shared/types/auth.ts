@@ -4,8 +4,8 @@
  * 前后端共享，仅含纯类型定义。
  */
 
-/** 第三方 OAuth 平台标识 */
-export type OAuthProvider = "github" | "qq" | "wechat"
+/** 第三方 OAuth 平台标识（只接 GitHub） */
+export type OAuthProvider = "github"
 
 /** 注册请求体 */
 export interface RegisterPayload {
@@ -69,11 +69,9 @@ export interface OAuthPlatformCredentials {
 	clientSecret: string
 }
 
-/** OAuth 凭证集合（存 settings 表，secret 加密） */
+/** OAuth 凭证集合（存 settings 表，secret 加密）。当前只接 GitHub 一家 */
 export interface OAuthCredentials {
 	github?: OAuthPlatformCredentials
-	qq?: OAuthPlatformCredentials
-	wechat?: OAuthPlatformCredentials
 }
 
 /** 管理员后台配置（敏感字段脱敏后返回前端） */
@@ -88,8 +86,6 @@ export interface AdminSettingsResponse {
 	smtp: (Omit<SmtpConfig, "pass"> & { pass: string | null }) | null
 	oauth: {
 		github?: (Omit<OAuthPlatformCredentials, "clientSecret"> & { clientSecret: string | null })
-		qq?: (Omit<OAuthPlatformCredentials, "clientSecret"> & { clientSecret: string | null })
-		wechat?: (Omit<OAuthPlatformCredentials, "clientSecret"> & { clientSecret: string | null })
 	}
 	llm: (Omit<LlmConfig, "apiKey"> & { apiKey: string | null }) | null
 }

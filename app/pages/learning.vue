@@ -1,249 +1,274 @@
 <script setup lang="ts">
-definePageMeta({ layout: 'learning' })
+/**
+ * 关卡路径：把学习路径渲染成多邻国式的蛇形关卡地图。
+ * 数据来自 /api/learning-path（路径 + items）与 /api/skills（技能名映射）。
+ */
+useHead({ title: "关卡路径 · FSP" })
 
-useHead({ title: "个性化导学 · FSP" })
-
-interface Position { id: number, name: string, category: string }
-interface PathItem { id: number, skill_id: number | null, resource_id: number | null, sort_order: number, status: string }
-interface LearningPath { id: number, name: string, target_position_id: number | null, status: string, created_at: string, items: PathItem[] }
-interface Skill { id: number, name: string }
-interface Resource { id: number, title: string }
-
-const loading = ref(true)
-const generating = ref(false)
-const paths = ref<LearningPath[]>([])
-const positions = ref<Position[]>([])
-const positionOptions = ref<{ label: string, value: number }[]>([])
-const selectedPosition = ref<number | null>(null)
-const message = ref<{ color: "success" | "error" | "warning", text: string } | null>(null)
-const skillMap = ref<Map<number, string>>(new Map())
-const resourceMap = ref<Map<number, string>>(new Map())
-
-async function loadPaths() {
-  loading.value = true
-  try {
-    paths.value = await $fetch<LearningPath[]>("/api/learning-path")
-    const skillIds = new Set<number>()
-    const resourceIds = new Set<number>()
-    for (const p of paths.value) {
-      for (const item of p.items) {
-        if (item.skill_id) skillIds.add(item.skill_id)
-        if (item.resource_id) resourceIds.add(item.resource_id)
-      }
-    }
-    if (skillIds.size > 0) {
-      const data = await $fetch<{ skills: Skill[] }>("/api/skills")
-      skillMap.value = new Map(data.skills.map((s) => [s.id, s.name]))
-    }
-    if (resourceIds.size > 0) {
-      const resources = await $fetch<Resource[]>("/api/resources")
-      resourceMap.value = new Map(resources.map((r) => [r.id, r.title]))
-    }
-  } catch {
-  } finally {
-    loading.value = false
-  }
+interface PathItem {
+  id: number
+  skill_id: number | null
+  resource_id: number | null
+  sort_order: number
+  status: string
 }
 
-async function loadPositions() {
-  try {
-    const data = await $fetch<Position[]>("/api/positions")
-    positions.value = data
-    positionOptions.value = data.map((p) => ({ label: p.name, value: p.id }))
-  } catch {
-  }
+interface RawPath {
+  id: number
+  name: string
+  target_position_id: number | null
+  status: string
+  created_at: string
+  /** generating / ready / degraded / failed */
+  generation_status: string
+  items: PathItem[]
 }
 
-onMounted(() => {
-  loadPaths()
-  loadPositions()
+interface Skill {
+  id: number
+  name: string
+}
+
+interface MapItem {
+  id: number
+  name: string
+  status: string
+}
+
+const fetcher = import.meta.server ? useRequestFetch() : $fetch
+
+const { user } = useAuthSession()
+const { llmReady, llmReasonText, setupPath, load: loadStatus } = useSystemStatus()
+const isAdmin = computed(() => user.value?.role === "admin")
+
+// 大模型是强依赖：未配置时这里只能读旧内容，要明确告诉用户原因
+await loadStatus()
+
+const { data: paths, refresh } = await useAsyncData<RawPath[]>("learning-paths", () =>
+  fetcher<RawPath[]>("/api/learning-path"),
+)
+
+const { data: skills } = await useAsyncData<{ skills: Skill[] }>("learning-skills", () =>
+  fetcher<{ skills: Skill[] }>("/api/skills"),
+)
+
+const skillNames = computed(
+  () => new Map((skills.value?.skills ?? []).map((s) => [s.id, s.name])),
+)
+
+const pathList = computed(() => paths.value ?? [])
+
+const selectedId = ref<number | null>(null)
+
+const activePath = computed(() => {
+  if (selectedId.value) {
+    return pathList.value.find((p) => p.id === selectedId.value) ?? null
+  }
+  return pathList.value.find((p) => p.status === "active") ?? pathList.value[0] ?? null
 })
 
-async function generate() {
-  if (!selectedPosition.value) return
-  generating.value = true
-  message.value = null
+const mapItems = computed<MapItem[]>(() =>
+  (activePath.value?.items ?? [])
+    .slice()
+    .sort((a, b) => a.sort_order - b.sort_order)
+    .map((item) => ({
+      id: item.id,
+      name: item.skill_id ? (skillNames.value.get(item.skill_id) ?? "未命名技能") : "学习资源",
+      status: item.status,
+    })),
+)
+
+const completed = computed(
+  () => mapItems.value.filter((i) => i.status === "completed").length,
+)
+const total = computed(() => mapItems.value.length)
+const percent = computed(() =>
+  total.value ? Math.round((completed.value / total.value) * 100) : 0,
+)
+
+const pathOptions = computed(() =>
+  pathList.value.map((p) => ({
+    label: `${p.name}${p.status === "active" ? "" : `（${p.status === "completed" ? "已完成" : "已存档"}）`}`,
+    value: p.id,
+  })),
+)
+
+const selectedOption = computed({
+  get: () => activePath.value?.id ?? null,
+  set: (value: number | null) => {
+    selectedId.value = value
+  },
+})
+
+const busy = ref(false)
+
+async function setStatus(pathId: number, status: "active" | "archived") {
+  busy.value = true
   try {
-    const res = await $fetch<{ ok: boolean, gapCount: number }>("/api/learning-path/generate", {
-      method: "POST",
-      body: { position_id: selectedPosition.value },
-    })
-    message.value = { color: "success", text: `学习路径已生成，共 ${res.gapCount} 个待学习技能` }
-    selectedPosition.value = null
-    await loadPaths()
-  } catch (error) {
-    const data = (error as { data?: { message?: string } })?.data
-    message.value = { color: "error", text: data?.message || "生成失败" }
+    await $fetch(`/api/learning-path/${pathId}`, { method: "PATCH", body: { status } })
+    selectedId.value = null
+    await refresh()
   } finally {
-    generating.value = false
+    busy.value = false
   }
 }
 
-async function updateItem(item: PathItem, status: string) {
-  try {
-    await $fetch(`/api/learning-path/item/${item.id}`, {
-      method: "PATCH",
-      body: { status },
-    })
-    item.status = status
-  } catch {
-  }
-}
-
-async function activatePath(pathId: number) {
-  try {
-    await $fetch(`/api/learning-path/${pathId}`, { method: "PATCH", body: { status: "active" } })
-    await loadPaths()
-  } catch (error) {
-    const data = (error as { data?: { message?: string } })?.data
-    message.value = { color: "error", text: data?.message || "切换失败" }
-  }
-}
-
-async function archivePath(pathId: number) {
-  try {
-    await $fetch(`/api/learning-path/${pathId}`, { method: "PATCH", body: { status: "archived" } })
-    await loadPaths()
-  } catch (error) {
-    const data = (error as { data?: { message?: string } })?.data
-    message.value = { color: "error", text: data?.message || "存档失败" }
-  }
-}
-
-async function deletePath(pathId: number) {
+async function removePath(pathId: number) {
+  busy.value = true
   try {
     await $fetch(`/api/learning-path/${pathId}`, { method: "DELETE" })
-    await loadPaths()
-  } catch (error) {
-    const data = (error as { data?: { message?: string } })?.data
-    message.value = { color: "error", text: data?.message || "删除失败" }
+    selectedId.value = null
+    await refresh()
+  } finally {
+    busy.value = false
   }
 }
 
-const statusColor = (s: string) => s === "completed" ? "success" : s === "in_progress" ? "warning" : "neutral"
-const statusLabel = (s: string) => s === "completed" ? "已完成" : s === "in_progress" ? "进行中" : "待学习"
-const pathStatusColor = (s: string) => s === "active" ? "primary" : s === "completed" ? "success" : "neutral"
-const pathStatusLabel = (s: string) => s === "active" ? "进行中" : s === "completed" ? "已完成" : "已存档"
+const toast = useToast()
+const regenerating = ref(false)
 
-const activePaths = computed(() => paths.value.filter((p) => p.status === "active"))
-const archivedPaths = computed(() => paths.value.filter((p) => p.status !== "active"))
+/**
+ * 重新生成降级路径：删掉旧路径再按同一方向走一次生成。
+ * 已有正文的技能会被复用，所以只会补那些还是模板的关卡。
+ */
+async function regenerate() {
+  const path = activePath.value
+  if (!path || regenerating.value) return
+
+  regenerating.value = true
+  try {
+    await $fetch(`/api/learning-path/${path.id}`, { method: "DELETE" })
+    await $fetch("/api/learning-path/generate", {
+      method: "POST",
+      body: { position_id: path.target_position_id, generate_content: true },
+      timeout: 240_000,
+    })
+    selectedId.value = null
+    await refresh()
+    toast.add({ title: "已重新生成", description: "关卡正文已更新", color: "success", icon: "i-lucide-sparkles" })
+  } catch (err) {
+    const message = (err as { data?: { message?: string } })?.data?.message
+    toast.add({ title: "重新生成失败", description: message || "请稍后重试", color: "error" })
+  } finally {
+    regenerating.value = false
+  }
+}
 </script>
 
 <template>
-  <UContainer class="py-10">
-    <div class="mb-8">
-      <h1 class="text-2xl font-semibold tracking-tight">个性化导学</h1>
-      <p class="mt-1 text-sm text-muted">基于技能短板生成学习路径，支持多方向切换与断点续学</p>
+  <div class="mx-auto w-full max-w-2xl px-4 py-8">
+    <div class="flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h1 class="text-2xl font-semibold tracking-tight">关卡路径</h1>
+        <p v-if="activePath" class="mt-1 text-sm text-muted">
+          <template v-if="pathList.length > 1">已完成 {{ completed }}/{{ total }}</template>
+          <template v-else>{{ activePath.name }} · 已完成 {{ completed }}/{{ total }}</template>
+        </p>
+        <p v-else class="mt-1 text-sm text-muted">暂无学习路径</p>
+      </div>
+
+      <USelect
+        v-if="pathList.length > 1"
+        v-model="selectedOption"
+        :items="pathOptions"
+        size="sm"
+        class="w-48"
+        placeholder="切换方向"
+        aria-label="切换学习方向"
+      />
     </div>
 
-    <!-- 生成新路径 -->
-    <UCard class="mb-6">
-      <template #header>
-        <div class="flex items-center gap-2">
-          <UIcon name="i-lucide-plus" class="text-lg" />
-          <span class="font-medium">开始新的学习方向</span>
-        </div>
-      </template>
-      <div class="flex flex-wrap items-end gap-4">
-        <div class="flex-1 min-w-48">
-          <label class="mb-1 block text-sm">目标岗位</label>
-          <USelect v-model="selectedPosition" :items="positionOptions" placeholder="选择岗位" class="w-full" />
-        </div>
-        <UButton color="primary" :loading="generating" :disabled="!selectedPosition" label="生成学习路径" @click="generate" />
-      </div>
-      <UAlert v-if="message" :color="message.color" :title="message.text" class="mt-4" />
-    </UCard>
+    <div class="mt-4 flex items-center gap-3">
+      <UProgress :model-value="percent" class="flex-1" />
+      <span class="text-sm font-medium tabular-nums">{{ percent }}%</span>
+    </div>
 
-    <div v-if="loading" class="py-20 text-center text-muted">加载中…</div>
-
-    <template v-else>
-      <!-- 活跃路径 -->
-      <div v-if="activePaths.length > 0" class="mb-8">
-        <h2 class="mb-4 text-lg font-medium">当前学习方向</h2>
-        <div class="space-y-6">
-          <UCard v-for="path in activePaths" :key="path.id">
-            <template #header>
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-3">
-                  <h3 class="font-medium">{{ path.name }}</h3>
-                  <UBadge :color="pathStatusColor(path.status)" variant="soft" size="sm">{{ pathStatusLabel(path.status) }}</UBadge>
-                </div>
-                <div class="flex items-center gap-2">
-                  <UButton size="xs" variant="soft" color="neutral" icon="i-lucide-archive" label="存档" @click="archivePath(path.id)" />
-                  <UButton size="xs" variant="soft" color="error" icon="i-lucide-trash-2" label="删除" @click="deletePath(path.id)" />
-                </div>
-              </div>
-            </template>
-            <div class="space-y-2">
-              <div
-                v-for="item in path.items"
-                :key="item.id"
-                class="flex items-center justify-between rounded-lg border p-3"
-              >
-                <div class="flex items-center gap-3">
-                  <span class="text-sm text-muted">#{{ item.sort_order + 1 }}</span>
-                  <div class="flex flex-col">
-                    <span class="text-sm font-medium">{{ skillMap.get(item.skill_id!) || '未知技能' }}</span>
-                    <span v-if="item.resource_id" class="text-xs text-muted">📖 {{ resourceMap.get(item.resource_id!) || '学习资源' }}</span>
-                  </div>
-                </div>
-                <div class="flex items-center gap-2">
-                  <UBadge :color="statusColor(item.status)" variant="soft" size="sm">{{ statusLabel(item.status) }}</UBadge>
-                  <UButton
-                    v-if="item.status !== 'completed'"
-                    size="xs"
-                    color="success"
-                    variant="soft"
-                    label="完成"
-                    @click="updateItem(item, 'completed')"
-                  />
-                  <UButton
-                    v-if="item.status === 'pending'"
-                    size="xs"
-                    variant="soft"
-                    label="开始"
-                    @click="updateItem(item, 'in_progress')"
-                  />
-                </div>
-              </div>
-            </div>
-          </UCard>
-        </div>
+    <!-- 大模型未配置：页面能看，但别再让用户以为「生成了」 -->
+    <div v-if="!llmReady" class="mt-4 rounded-lg bg-error/10 px-3 py-2.5 text-sm text-error">
+      <div class="flex items-start gap-2">
+        <UIcon name="i-lucide-plug-zap" class="mt-0.5 size-4 shrink-0" />
+        <span>
+          {{ llmReasonText }}
+          存量模板内容不会自动更新，配置接口后可在下方重新生成。
+        </span>
       </div>
+      <UButton
+        v-if="isAdmin"
+        :to="setupPath"
+        class="mt-2 ml-6"
+        size="xs"
+        variant="soft"
+        color="error"
+        icon="i-lucide-settings"
+        label="前往配置"
+      />
+    </div>
 
-      <!-- 存档/已完成路径 -->
-      <div v-if="archivedPaths.length > 0">
-        <h2 class="mb-4 text-lg font-medium">其他学习方向</h2>
-        <div class="space-y-4">
-          <UCard v-for="path in archivedPaths" :key="path.id">
-            <template #header>
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-3">
-                  <h3 class="font-medium">{{ path.name }}</h3>
-                  <UBadge :color="pathStatusColor(path.status)" variant="soft" size="sm">{{ pathStatusLabel(path.status) }}</UBadge>
-                  <UBadge variant="soft" size="sm">{{ path.items.length }} 步</UBadge>
-                </div>
-                <div class="flex items-center gap-2">
-                  <UButton
-                    v-if="path.status !== 'active'"
-                    size="xs"
-                    variant="soft"
-                    color="primary"
-                    icon="i-lucide-play"
-                    label="切换到此方向"
-                    @click="activatePath(path.id)"
-                  />
-                  <UButton size="xs" variant="soft" color="error" icon="i-lucide-trash-2" label="删除" @click="deletePath(path.id)" />
-                </div>
-              </div>
-            </template>
-          </UCard>
-        </div>
+    <!-- 降级路径必须自报家门：正文是离线模板，不是模型针对这个人写的 -->
+    <div
+      v-if="llmReady && activePath?.generation_status === 'degraded'"
+      class="mt-4 rounded-lg bg-warning/10 px-3 py-2.5 text-sm text-warning"
+    >
+      <div class="flex items-start gap-2">
+        <UIcon name="i-lucide-triangle-alert" class="mt-0.5 size-4 shrink-0" />
+        <span>
+          本路径正文为离线模板（生成时未接入大模型或调用失败）。重新生成可替换为模型内容。
+        </span>
       </div>
+      <UButton
+        v-if="llmReady"
+        class="mt-2 ml-6"
+        size="xs"
+        variant="soft"
+        color="warning"
+        icon="i-lucide-refresh-cw"
+        label="重新生成"
+        :loading="regenerating"
+        @click="regenerate"
+      />
+    </div>
 
-      <div v-if="paths.length === 0" class="py-20 text-center text-muted">
-        暂无学习路径，请先选择目标岗位生成路径
+    <LearnPathMap :items="mapItems" class="mt-6" />
+
+    <!-- 管理学习方向：日常不用，收在底部 -->
+    <details v-if="activePath" class="mt-8 rounded-xl border border-default p-4">
+      <summary class="cursor-pointer text-sm text-muted">管理学习方向</summary>      <div class="mt-4 flex flex-wrap gap-2">
+        <UButton
+          v-if="activePath.status !== 'active'"
+          size="xs"
+          variant="soft"
+          label="设为当前方向"
+          :loading="busy"
+          @click="setStatus(activePath.id, 'active')"
+        />
+        <UButton
+          v-else
+          size="xs"
+          variant="soft"
+          color="neutral"
+          icon="i-lucide-archive"
+          label="存档"
+          :loading="busy"
+          @click="setStatus(activePath.id, 'archived')"
+        />
+        <UButton
+          size="xs"
+          variant="soft"
+          color="error"
+          icon="i-lucide-trash-2"
+          label="删除这条路径"
+          :loading="busy"
+          @click="removePath(activePath.id)"
+        />
+        <UButton
+          to="/onboarding"
+          size="xs"
+          variant="ghost"
+          color="neutral"
+          icon="i-lucide-plus"
+          label="新建方向"
+        />
       </div>
-    </template>
-  </UContainer>
+    </details>
+  </div>
 </template>

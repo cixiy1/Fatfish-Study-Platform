@@ -1,5 +1,5 @@
 <script setup lang="ts">
-definePageMeta({ auth: true, layout: 'learning' })
+definePageMeta({ auth: true })
 
 useHead({
   title: "个人中心 · FSP",

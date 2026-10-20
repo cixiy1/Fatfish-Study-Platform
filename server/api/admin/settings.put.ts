@@ -47,12 +47,10 @@ function mergeOAuthCredentials(input: Partial<OAuthCredentials>): OAuthCredentia
 	const existing = getOAuthConfig()
 	const result: OAuthCredentials = {}
 
-	for (const platform of ["github", "qq", "wechat"] as const) {
-		const incoming = input[platform]
-		if (incoming && incoming.clientId) {
-			const secret = incoming.clientSecret ?? existing[platform]?.clientSecret ?? ""
-			result[platform] = { clientId: incoming.clientId, clientSecret: secret }
-		}
+	const incoming = input.github
+	if (incoming && incoming.clientId) {
+		const secret = incoming.clientSecret ?? existing.github?.clientSecret ?? ""
+		result.github = { clientId: incoming.clientId, clientSecret: secret }
 	}
 
 	return result

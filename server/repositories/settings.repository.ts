@@ -94,10 +94,9 @@ export function getOAuthConfig(): OAuthCredentials {
 
 	try {
 		const parsed = JSON.parse(raw) as OAuthCredentials
+		// 历史数据里可能残留 qq / wechat 字段，读的时候直接丢掉，只认 github
 		return {
 			github: decryptPlatform(parsed.github),
-			qq: decryptPlatform(parsed.qq),
-			wechat: decryptPlatform(parsed.wechat),
 		}
 	} catch {
 		return {}
@@ -108,8 +107,6 @@ export function getOAuthConfig(): OAuthCredentials {
 export function setOAuthConfig(config: OAuthCredentials): void {
 	const stored: OAuthCredentials = {
 		github: encryptPlatform(config.github),
-		qq: encryptPlatform(config.qq),
-		wechat: encryptPlatform(config.wechat),
 	}
 	setSetting(KEY_OAUTH, JSON.stringify(stored))
 }

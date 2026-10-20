@@ -1,7 +1,6 @@
 <script setup lang="ts">
-definePageMeta({ layout: 'learning' })
 
-useHead({ title: "学习评估复盘 · FSP" })
+useHead({ title: "学习复盘 · FSP" })
 
 interface Report {
   id: number
@@ -61,8 +60,8 @@ function viewReport(report: Report) {
   <UContainer class="py-10">
     <div class="mb-8 flex items-center justify-between">
       <div>
-        <h1 class="text-2xl font-semibold tracking-tight">学习评估复盘</h1>
-        <p class="mt-1 text-sm text-muted">生成学习报告，可视化评估学习效果</p>
+        <h1 class="text-2xl font-semibold tracking-tight">学习复盘</h1>
+        <p class="mt-1 text-sm text-muted">汇总学习数据，评估阶段成效</p>
       </div>
       <UButton color="primary" :loading="generating" label="生成报告" @click="generate" />
     </div>
@@ -126,7 +125,7 @@ function viewReport(report: Report) {
     <div v-if="loading" class="py-10 text-center text-muted">加载中…</div>
     <div v-else>
       <h2 class="mb-4 font-medium">历史报告</h2>
-      <div v-if="reports.length === 0" class="py-10 text-center text-muted">暂无报告，点击"生成报告"创建</div>
+      <div v-if="reports.length === 0" class="py-10 text-center text-muted">暂无报告</div>
       <div v-else class="space-y-3">
         <UCard
           v-for="r in reports"
@@ -136,7 +135,7 @@ function viewReport(report: Report) {
         >
           <div class="flex items-center justify-between">
             <span class="font-medium">{{ r.type === "stage" ? "阶段性报告" : r.type }}</span>
-            <span class="text-sm text-muted">{{ r.created_at }}</span>
+            <span class="text-sm text-muted">{{ formatDateTime(r.created_at) }}</span>
           </div>
         </UCard>
       </div>

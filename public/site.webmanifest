@@ -1,0 +1,23 @@
+{
+  "name": "FSP",
+  "short_name": "FSP",
+  "description": "面向任意主题的 AI 学习平台：访谈定方向，技能点拆成每日关卡",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0d9488",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

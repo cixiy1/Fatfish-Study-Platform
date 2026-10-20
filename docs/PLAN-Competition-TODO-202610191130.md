@@ -85,7 +85,7 @@ type: PLAN
 | UI | `@nuxt/ui` v4 + Tailwind | 已有，`primary: teal` |
 | 内容/知识库 | `@nuxt/content` | 已有，知识点写成 Markdown |
 | 数据 | SQLite（`better-sqlite3` 已装） | 用户、测评、路径、会话 |
-| 大模型 | 华为云 MaaS（OpenAI 兼容） | 无 key 时走 mock 分支，保证可演示 |
+| 大模型 | 华为云 MaaS（OpenAI 兼容） | **强依赖（必填）**：未配置时业务接口返回 503 并引导去后台配置，不再用 mock 假演示 |
 | 图谱可视化 | 自绘 SVG + 轻量布局 | 不引重型图库，减少翻车面 |
 
 ### 4.2 数据模型（先定表，再写页面）
@@ -209,7 +209,7 @@ docs/submit/
 | 风险 | 概率 | 降级方案 |
 |---|---|---|
 | 码道额度/网络不稳 | 中 | 本地 IDE 继续写，码道里补"重构/排错/文档"环节的对话，痕迹照样成立 |
-| 大模型接口不可用 | 中 | `server/utils/llm.ts` 写 mock 分支，返回预置结果，演示不断流 |
+| 大模型接口不可用 | 中 | 明确失败而非假装成功：后端 `requireLlm()` 返回 503 `LLM_NOT_CONFIGURED`，前端引导页/关卡页/后台横幅三处提示去配置；mock 仅保留给离线单测 |
 | 图谱做不完 | 中 | 降级成"技能清单 + 依赖箭头"的卡片流，视觉上仍是图 |
 | RAG 效果差 | 中 | 只对知识点标题做关键词匹配 + 引用原文，稳定优先 |
 | 临期提交拥堵 | 高 | 10-24 上午提交，之后只在必要时覆盖 |
@@ -222,3 +222,29 @@ docs/submit/
 1. 打开码道，把"登录页 + 路由守卫已完成"的现状贴进去，让它输出**六大模块的技术方案与表结构**
 2. 截图（Prompt + 输出），存进 `docs/submit/codearts-proof/2026-10-19/`
 3. 回来告诉我方案里哪几条不认同，我按你的意见改完直接开工写代码
+
+---
+
+## 10. 实施进度（滚动更新 · 最后更新 2026-10-19 20:40）
+
+| 阶段 | 内容 | 状态 | 落点 |
+|---|---|---|---|
+| P0 | 登录/注册/鉴权链路、路由守卫、UI 体系 | 完成 | `app/middleware/a.CheckUser.global.ts`、`app/pages/login.vue` |
+| P1 | 数据模型迁移 v6（方向/资料/掌握度/生成状态） | 完成 | `server/utils/schema.ts` |
+| P2 | 统一大模型客户端（双协议 / 重试 / JSON 修复） | 完成 | `server/utils/llm.ts`、`llm-json.ts` |
+| P2.5 | 大模型改为强依赖：就绪守卫 + 未配置全站引导 + 安装向导必填 | 完成 | `server/utils/llm-guard.ts`、`server/api/system/status.get.ts` |
+| P3 | AI 方向访谈 + 签名凭证选方向 + 四阶段引导 | 完成 | `server/api/direction/*`、`app/pages/onboarding.vue` |
+| P4 | 选定方向后一次性生成整套关卡资料 | 完成 | `server/utils/plan-generator.ts`、`server/api/learning-path/generate.post.ts` |
+| P5 | RAG 答疑（引用出处） | 未开始 | `server/api/qa/index.ts` 需接检索 |
+| P6 | 阶段测评 → 掌握度更新 → 学习报告 | 未开始 | `mastery_checks` 表已就绪 |
+| P7 | 掌握度驱动路径重排（答辩最亮一环） | 未开始 | `moveSkillsToReview` 已就绪 |
+
+### P4 的实现要点（给后续 Agent）
+
+1. **分块生成**：每次只让模型写 3 个技能点，避免单次输出被 max_tokens 截断；块间并发 2 路。
+2. **总预算 150s**：预算耗尽后剩余的关卡走本地模板兜底，接口一定返回，不会挂死请求。
+3. **三级降级**：模型成功 → 模型失败但已有可读正文（复用）→ 本地模板（`origin: "stub"`，路径标记 `degraded`）。
+4. **落库字段**：`learning_resources.content` 存 Markdown，`objectives` 存 JSON 数组，`duration` 存预估分钟。
+5. **渲染安全**：`app/utils/markdown.ts` 先转义再上标签，正文 v-html 不会引入 XSS；不支持语法按普通段落输出，不丢内容。
+6. **接口契约**：`POST /api/learning-path/generate` body `{ position_id?, generate_content? }`，返回 `generated` / `fallback` / `degraded`。
+

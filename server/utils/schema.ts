@@ -279,6 +279,76 @@ const MIGRATIONS: Migration[] = [
 			CREATE INDEX IF NOT EXISTS idx_pwd_reset_user ON password_reset_tokens(user_id);
 		`,
 	},
+	{
+		version: 6,
+		name: "add_ai_generation_fields",
+		sql: `
+			-- 岗位：区分种子岗位与 AI 按需生成的方向
+			ALTER TABLE positions ADD COLUMN owner_user_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
+			ALTER TABLE positions ADD COLUMN source TEXT NOT NULL DEFAULT 'seed';
+			ALTER TABLE positions ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+			ALTER TABLE positions ADD COLUMN generated_at TEXT;
+
+			-- 岗位技能：AI 方向需要保留模型给出的学习顺序
+			ALTER TABLE position_skills ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
+
+			-- 学习资源：补正文与生成来源
+			ALTER TABLE learning_resources ADD COLUMN content TEXT;
+			ALTER TABLE learning_resources ADD COLUMN summary TEXT;
+			ALTER TABLE learning_resources ADD COLUMN objectives TEXT;
+			ALTER TABLE learning_resources ADD COLUMN source TEXT NOT NULL DEFAULT 'seed';
+			ALTER TABLE learning_resources ADD COLUMN status TEXT NOT NULL DEFAULT 'external';
+			ALTER TABLE learning_resources ADD COLUMN generated_at TEXT;
+			ALTER TABLE learning_resources ADD COLUMN model TEXT;
+
+			-- 学习路径：同步生成状态
+			ALTER TABLE learning_paths ADD COLUMN generation_status TEXT NOT NULL DEFAULT 'ready';
+			ALTER TABLE learning_paths ADD COLUMN model TEXT;
+			ALTER TABLE learning_paths ADD COLUMN generated_at TEXT;
+			ALTER TABLE learning_paths ADD COLUMN error_message TEXT;
+
+			-- 关卡：类型与预估时长
+			ALTER TABLE learning_path_items ADD COLUMN item_type TEXT NOT NULL DEFAULT 'lesson';
+			ALTER TABLE learning_path_items ADD COLUMN estimated_minutes INTEGER;
+
+			-- 存量资源没有正文，按有无外链标注
+			UPDATE learning_resources
+			SET status = CASE WHEN url IS NOT NULL AND url <> '' THEN 'external' ELSE 'fallback' END;
+
+			-- 存量关卡同步类型
+			UPDATE learning_path_items
+			SET item_type = CASE WHEN resource_id IS NULL THEN 'none' ELSE 'external' END;
+
+			CREATE INDEX IF NOT EXISTS idx_positions_owner_status ON positions(owner_user_id, status);
+			CREATE INDEX IF NOT EXISTS idx_positions_name ON positions(name);
+			CREATE INDEX IF NOT EXISTS idx_resources_skill_status ON learning_resources(skill_id, status);
+			CREATE INDEX IF NOT EXISTS idx_paths_user_position ON learning_paths(user_id, target_position_id);
+			CREATE INDEX IF NOT EXISTS idx_path_items_path_order ON learning_path_items(path_id, sort_order);
+
+			-- 阶段测评：模型出的题 + 待用户接受的评分
+			CREATE TABLE IF NOT EXISTS mastery_checks (
+				id          INTEGER PRIMARY KEY AUTOINCREMENT,
+				user_id     INTEGER NOT NULL,
+				path_id     INTEGER NOT NULL,
+				skill_ids   TEXT    NOT NULL DEFAULT '[]',
+				questions   TEXT    NOT NULL,
+				answers     TEXT,
+				score       INTEGER,
+				result_data TEXT,
+				status      TEXT    NOT NULL DEFAULT 'ready',
+				model       TEXT,
+				mock        INTEGER NOT NULL DEFAULT 0,
+				created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+				scored_at   TEXT,
+				accepted_at TEXT,
+				FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+				FOREIGN KEY (path_id) REFERENCES learning_paths(id) ON DELETE CASCADE
+			);
+
+			CREATE INDEX IF NOT EXISTS idx_mastery_user ON mastery_checks(user_id, created_at DESC);
+			CREATE INDEX IF NOT EXISTS idx_mastery_path ON mastery_checks(path_id);
+		`,
+	},
 ]
 
 /** 幂等执行所有未应用的迁移 */

@@ -3,6 +3,7 @@ import {
 	validateAdminInput,
 	validateDatabaseInput,
 	validateInstallPayload,
+	validateLlmInput,
 	validateOAuthInput,
 	validateSmtpInput,
 } from "../../shared/utils/validate-install"
@@ -39,10 +40,20 @@ describe("validate-install", () => {
 		expect(result.message).toContain("数据库")
 	})
 
+	it("缺大模型配置失败（必填）", () => {
+		const result = validateInstallPayload({
+			database: { file: "data/fsp.db" },
+			admin: { account: "admin", password: "Abcd1234" },
+		})
+		expect(result.ok).toBe(false)
+		expect(result.message).toContain("大模型")
+	})
+
 	it("完整合法载荷通过", () => {
 		const result = validateInstallPayload({
 			database: { file: "data/fsp.db" },
 			admin: { account: "admin", password: "Abcd1234" },
+			llm: { provider: "openai", apiKey: "sk-test", model: "gpt-4o" },
 		})
 		expect(result.ok).toBe(true)
 	})
@@ -149,20 +160,51 @@ describe("validate-oauth", () => {
 		).toBe(false)
 	})
 
-	it("QQ 缺 Secret 失败", () => {
+	it("GitHub 缺 Secret 失败", () => {
 		expect(
 			validateOAuthInput({
-				qq: { clientId: "id", clientSecret: "" },
+				github: { clientId: "id", clientSecret: "" },
 			}).ok,
 		).toBe(false)
 	})
+})
 
-	it("三平台同时配置通过", () => {
+describe("validate-llm", () => {
+	it("未提供时失败（大模型是必填依赖）", () => {
+		expect(validateLlmInput(undefined).ok).toBe(false)
+	})
+
+	it("缺 API Key 失败", () => {
 		expect(
-			validateOAuthInput({
-				github: { clientId: "g-id", clientSecret: "g-secret" },
-				qq: { clientId: "q-id", clientSecret: "q-secret" },
-				wechat: { clientId: "w-id", clientSecret: "w-secret" },
+			validateLlmInput({ provider: "openai", apiKey: "", model: "gpt-4o" }).ok,
+		).toBe(false)
+	})
+
+	it("缺模型名称失败", () => {
+		expect(
+			validateLlmInput({ provider: "openai", apiKey: "sk-test", model: "" }).ok,
+		).toBe(false)
+	})
+
+	it("自定义提供商缺 Base URL 失败", () => {
+		expect(
+			validateLlmInput({ provider: "custom", apiKey: "sk-test", model: "my-model" }).ok,
+		).toBe(false)
+	})
+
+	it("预设提供商合法配置通过", () => {
+		expect(
+			validateLlmInput({ provider: "anthropic", apiKey: "sk-ant", model: "claude-3-5-sonnet" }).ok,
+		).toBe(true)
+	})
+
+	it("自定义提供商填全通过", () => {
+		expect(
+			validateLlmInput({
+				provider: "custom",
+				baseUrl: "https://maas.example.com/v1",
+				apiKey: "sk-test",
+				model: "pangu",
 			}).ok,
 		).toBe(true)
 	})

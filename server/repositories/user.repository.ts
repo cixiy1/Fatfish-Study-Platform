@@ -96,6 +96,22 @@ export function createOAuthUser(input: {
 	return findUserById(Number(info.lastInsertRowid)) as UserRecord
 }
 
+/**
+ * 把第三方身份绑定到已有账号（邮箱认领）。
+ *
+ * 只在 `processOAuthUser` 里使用：用户先用密码注册过，再用 GitHub 登录，
+ * 两边邮箱一致时直接复用原账号，不新建 `github_<id>` 账号，学习数据不丢。
+ */
+export function linkOAuthAccount(id: number, provider: OAuthProvider, subject: string): void {
+	getDb()
+		.prepare(
+			`UPDATE users
+			 SET oauth_provider = ?, oauth_subject = ?, updated_at = datetime('now')
+			 WHERE id = ?`,
+		)
+		.run(provider, subject, id)
+}
+
 /** 激活用户（status → active） */
 export function activateUser(id: number): void {
 	getDb()

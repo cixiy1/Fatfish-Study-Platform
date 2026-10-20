@@ -35,5 +35,5 @@ test-results/
 .vscode
 
 #agent
-#.codeartsdoer 该比赛项目需要上传码道云数据，故不需要排除该文件夹
+.codeartsdoer
 .workbuddy

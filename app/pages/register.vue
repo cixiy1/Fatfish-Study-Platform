@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { isStrongPassword, isValidEmail } from "#shared/utils/validate"
 
+definePageMeta({ layout: "blank" })
+
 useHead({
   title: "注册 · FSP",
   meta: [{ name: "robots", content: "noindex" }],
@@ -20,6 +22,12 @@ const message = ref("")
 const messageType = ref<"success" | "error">("error")
 
 const { register } = useAuthSession()
+
+// GitHub 只在真的配了凭证时才出现，避免点了弹 501
+const { data: providers } = await useAsyncData<{ github: boolean } | null>("auth-providers", () =>
+  $fetch<{ github: boolean }>("/api/auth/providers").catch(() => null),
+)
+const githubEnabled = computed(() => providers.value?.github === true)
 
 function validate(state: typeof form) {
   const errors: { name: string; message: string }[] = []
@@ -92,11 +100,13 @@ function errorMessage(error: unknown) {
       <div
         class="relative flex items-center gap-2.5 text-sm font-semibold tracking-wide"
       >
-        <span
-          class="grid size-9 place-items-center rounded-lg bg-teal-400 text-sm font-bold text-teal-950"
+        <img
+          src="/logo-128.png"
+          alt=""
+          width="36"
+          height="36"
+          class="size-9 rounded-lg object-cover ring-1 ring-white/15"
         >
-          F
-        </span>
         FSP
       </div>
 
@@ -105,7 +115,7 @@ function errorMessage(error: unknown) {
           加入 FSP
         </p>
         <p class="mt-4 text-sm leading-relaxed text-slate-400">
-          创建账号，开始你的"内容"之旅。
+          创建账号，保存学习方向、关卡进度与学习记录。
         </p>
       </div>
 
@@ -116,7 +126,7 @@ function errorMessage(error: unknown) {
       <div class="w-full max-w-sm">
         <h1 class="text-2xl font-semibold tracking-tight">注册</h1>
         <p class="mt-2 text-sm text-muted">
-          填写信息创建账号，注册后需验证邮箱。
+          注册后需验证邮箱，验证完成即可登录。
         </p>
 
         <UForm
@@ -206,9 +216,9 @@ function errorMessage(error: unknown) {
           />
         </UForm>
 
-        <USeparator label="或" class="my-6" />
+        <template v-if="githubEnabled">
+          <USeparator label="或" class="my-6" />
 
-        <div class="grid grid-cols-3 gap-3">
           <UButton
             color="neutral"
             variant="outline"
@@ -216,30 +226,10 @@ function errorMessage(error: unknown) {
             block
             to="/api/auth/github"
             external
-          >
-            GitHub
-          </UButton>
-          <UButton
-            color="neutral"
-            variant="outline"
-            size="lg"
-            block
-            to="/api/auth/qq"
-            external
-          >
-            QQ
-          </UButton>
-          <UButton
-            color="neutral"
-            variant="outline"
-            size="lg"
-            block
-            to="/api/auth/wechat"
-            external
-          >
-            微信
-          </UButton>
-        </div>
+            icon="i-lucide-github"
+            label="使用 GitHub 注册 / 登录"
+          />
+        </template>
 
         <p class="mt-6 text-center text-sm text-muted">
           已有账号？

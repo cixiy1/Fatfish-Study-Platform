@@ -88,17 +88,15 @@ export function validateOAuthInput(input: InstallOAuthInput | undefined): Valida
 
 	const r1 = check("GitHub", input.github)
 	if (!r1.ok) return r1
-	const r2 = check("QQ", input.qq)
-	if (!r2.ok) return r2
-	const r3 = check("微信", input.wechat)
-	if (!r3.ok) return r3
 
 	return OK
 }
 
-/** 校验可选的大模型配置；未提供时放行 */
+/** 校验必填的大模型配置：没有它平台的 AI 功能完全不可用 */
 export function validateLlmInput(input: InstallLlmInput | undefined): ValidationResult {
-	if (!input) return OK
+	if (!input) {
+		return { ok: false, message: "请填写大模型接口配置（必填，AI 访谈与关卡资料都依赖它）" }
+	}
 
 	if (isBlank(input.apiKey)) {
 		return { ok: false, message: "大模型 API Key 不能为空" }
