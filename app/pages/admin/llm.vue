@@ -6,6 +6,7 @@ useHead({ title: "大模型配置 · 管理后台 · FSP" })
 
 const form = reactive({
   provider: "openai" as LlmProvider,
+  apiFormat: "openai" as "openai" | "anthropic",
   baseUrl: "",
   apiKey: "",
   model: "",
@@ -16,6 +17,8 @@ const loading = ref(true)
 const saving = ref(false)
 const testing = ref(false)
 const testPrompt = ref("")
+const fetchingModels = ref(false)
+const modelOptions = ref<{ label: string, value: string }[]>([])
 const message = ref<{ color: "success" | "error" | "warning", title: string, text?: string } | null>(null)
 const testResult = ref<{ color: "success" | "error", title: string, text?: string } | null>(null)
 const hasExistingKey = ref(false)
@@ -29,7 +32,17 @@ async function refreshStatus() {
 const providerOptions = [
   { label: "OpenAI", value: "openai" },
   { label: "Anthropic Claude", value: "anthropic" },
+  { label: "DeepSeek", value: "deepseek" },
+  { label: "通义千问（阿里云）", value: "qwen" },
+  { label: "智谱 GLM", value: "glm" },
+  { label: "华为云 MaaS", value: "maas" },
+  { label: "Moonshot（月之暗面）", value: "moonshot" },
   { label: "自定义（兼容 OpenAI 格式）", value: "custom" },
+]
+
+const apiFormatOptions = [
+  { label: "OpenAI 兼容（/chat/completions）", value: "openai" },
+  { label: "Anthropic 兼容（/messages）", value: "anthropic" },
 ]
 
 const isCustom = computed(() => form.provider === "custom")
@@ -39,6 +52,7 @@ watch(() => form.provider, (provider) => {
     const d = LLM_PROVIDER_DEFAULTS[provider as Exclude<LlmProvider, "custom">]
     form.baseUrl = d.baseUrl
     form.model = d.model
+    form.apiFormat = d.apiFormat
   }
 })
 
@@ -50,6 +64,7 @@ onMounted(async () => {
 
     if (settings.llm) {
       form.provider = settings.llm.provider
+      form.apiFormat = settings.llm.apiFormat ?? "openai"
       form.baseUrl = settings.llm.baseUrl
       form.model = settings.llm.model
       form.maxTokens = settings.llm.maxTokens
@@ -77,6 +92,7 @@ async function onSave() {
       body: {
         llm: {
           provider: form.provider,
+          apiFormat: form.apiFormat,
           baseUrl: form.baseUrl,
           apiKey: form.apiKey || undefined,
           model: form.model,
@@ -108,6 +124,31 @@ async function onTest() {
     testResult.value = { color: "error", title: "测试失败", text: extractMessage(error) }
   } finally {
     testing.value = false
+  }
+}
+
+async function onFetchModels() {
+  message.value = null
+  fetchingModels.value = true
+  try {
+    const res = await $fetch<{ models: string[] }>("/api/admin/fetch-models", {
+      method: "POST",
+      body: {
+        baseUrl: form.baseUrl,
+        apiKey: form.apiKey || undefined,
+        apiFormat: form.apiFormat,
+      },
+      timeout: 20_000,
+    })
+    modelOptions.value = res.models.map((m) => ({ label: m, value: m }))
+    if (res.models.length > 0 && !res.models.includes(form.model)) {
+      form.model = res.models[0]!
+    }
+    message.value = { color: "success", title: `拉取到 ${res.models.length} 个模型` }
+  } catch (error) {
+    message.value = { color: "error", title: "拉取模型列表失败", text: extractMessage(error) }
+  } finally {
+    fetchingModels.value = false
   }
 }
 
@@ -170,18 +211,18 @@ function extractMessage(error: unknown): string {
           />
         </UFormField>
 
-        <UFormField v-if="isCustom" label="Base URL">
-          <UInput
-            v-model="form.baseUrl"
-            placeholder="https://your-api-endpoint/v1"
+        <UFormField v-if="isCustom" label="兼容接口格式">
+          <USelect
+            v-model="form.apiFormat"
+            :items="apiFormatOptions"
             class="w-full"
           />
         </UFormField>
 
-        <UFormField v-else label="Base URL">
+        <UFormField label="Base URL（API 接口地址）" help="OpenAI 默认 https://api.openai.com/v1，可修改为兼容协议地址">
           <UInput
-            :model-value="form.baseUrl"
-            disabled
+            v-model="form.baseUrl"
+            placeholder="https://api.openai.com/v1"
             class="w-full"
           />
         </UFormField>
@@ -200,11 +241,27 @@ function extractMessage(error: unknown): string {
 
         <div class="grid gap-4 sm:grid-cols-2">
           <UFormField label="模型名称">
-            <UInput
-              v-model="form.model"
-              placeholder="gpt-4o / claude-3-5-sonnet-..."
-              class="w-full"
-            />
+            <div class="flex gap-2">
+              <USelect
+                v-if="modelOptions.length > 0"
+                v-model="form.model"
+                :items="modelOptions"
+                class="flex-1"
+              />
+              <UInput
+                v-else
+                v-model="form.model"
+                placeholder="gpt-4o / claude-3-5-sonnet-..."
+                class="flex-1"
+              />
+              <UButton
+                variant="soft"
+                :loading="fetchingModels"
+                :disabled="!form.baseUrl || (!form.apiKey && !hasExistingKey)"
+                icon="i-lucide-download"
+                @click="onFetchModels"
+              />
+            </div>
           </UFormField>
 
           <UFormField label="最大输出 Token">

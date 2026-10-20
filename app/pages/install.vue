@@ -29,6 +29,7 @@ const form = reactive({
 	},
 	llm: {
 		provider: "openai" as LlmProvider,
+		apiFormat: "openai" as "openai" | "anthropic",
 		baseUrl: "",
 		apiKey: "",
 		model: "",
@@ -44,6 +45,8 @@ const smtpTestTo = ref("")
 const smtpTestMessage = ref<{ color: "success" | "error" | "warning", title: string, text?: string } | null>(null)
 const llmTesting = ref(false)
 const llmTestMessage = ref<{ color: "success" | "error" | "warning", title: string, text?: string } | null>(null)
+const llmFetchingModels = ref(false)
+const llmModelOptions = ref<{ label: string, value: string }[]>([])
 const message = ref<{ color: "success" | "error" | "warning", title: string, text?: string } | null>(null)
 
 const smtpPresetOptions = [
@@ -56,7 +59,17 @@ const smtpPresetOptions = [
 const llmProviderOptions = [
 	{ label: "OpenAI", value: "openai" },
 	{ label: "Anthropic Claude", value: "anthropic" },
+	{ label: "DeepSeek", value: "deepseek" },
+	{ label: "通义千问（阿里云）", value: "qwen" },
+	{ label: "智谱 GLM", value: "glm" },
+	{ label: "华为云 MaaS", value: "maas" },
+	{ label: "Moonshot（月之暗面）", value: "moonshot" },
 	{ label: "自定义（兼容 OpenAI 格式）", value: "custom" },
+]
+
+const llmApiFormatOptions = [
+	{ label: "OpenAI 兼容（/chat/completions）", value: "openai" },
+	{ label: "Anthropic 兼容（/messages）", value: "anthropic" },
 ]
 
 watch(() => form.smtp.preset, (preset) => {
@@ -73,6 +86,7 @@ watch(() => form.llm.provider, (provider) => {
 		const d = LLM_PROVIDER_DEFAULTS[provider as Exclude<LlmProvider, "custom">]
 		form.llm.baseUrl = d.baseUrl
 		form.llm.model = d.model
+		form.llm.apiFormat = d.apiFormat
 	}
 })
 
@@ -128,6 +142,31 @@ async function onTestLlm() {
 	}
 }
 
+async function onFetchModels() {
+	llmTestMessage.value = null
+	llmFetchingModels.value = true
+	try {
+		const res = await $fetch<{ models: string[] }>("/api/admin/fetch-models", {
+			method: "POST",
+			body: {
+				baseUrl: form.llm.baseUrl,
+				apiKey: form.llm.apiKey,
+				apiFormat: form.llm.apiFormat,
+			},
+			timeout: 20_000,
+		})
+		llmModelOptions.value = res.models.map((m) => ({ label: m, value: m }))
+		if (res.models.length > 0 && !res.models.includes(form.llm.model)) {
+			form.llm.model = res.models[0]!
+		}
+		llmTestMessage.value = { color: "success", title: `拉取到 ${res.models.length} 个模型` }
+	} catch (error) {
+		llmTestMessage.value = { color: "error", title: "拉取模型列表失败", text: extractMessage(error) }
+	} finally {
+		llmFetchingModels.value = false
+	}
+}
+
 async function onSubmit() {
 	message.value = null
 
@@ -168,6 +207,7 @@ async function onSubmit() {
 	// 大模型是必填项，不做「跳过」分支
 	payload.llm = {
 		provider: form.llm.provider,
+		apiFormat: form.llm.apiFormat,
 		baseUrl: form.llm.baseUrl || undefined,
 		apiKey: form.llm.apiKey,
 		model: form.llm.model,
@@ -370,8 +410,12 @@ async function onSubmit() {
 							<USelect v-model="form.llm.provider" :items="llmProviderOptions" class="w-full" />
 						</div>
 						<div v-if="form.llm.provider === 'custom'">
-							<label class="mb-1 block text-sm">Base URL</label>
-							<UInput v-model="form.llm.baseUrl" placeholder="https://your-api-endpoint/v1" class="w-full" />
+							<label class="mb-1 block text-sm">兼容接口格式</label>
+							<USelect v-model="form.llm.apiFormat" :items="llmApiFormatOptions" class="w-full" />
+						</div>
+						<div>
+							<label class="mb-1 block text-sm">Base URL（API 接口地址）</label>
+							<UInput v-model="form.llm.baseUrl" placeholder="https://api.openai.com/v1" class="w-full" />
 						</div>
 						<div>
 							<label class="mb-1 block text-sm">API Key</label>
@@ -380,7 +424,22 @@ async function onSubmit() {
 						<div class="grid gap-3 sm:grid-cols-2">
 							<div>
 								<label class="mb-1 block text-sm">模型名称</label>
-								<UInput v-model="form.llm.model" placeholder="gpt-4o / claude-3-5-sonnet-..." class="w-full" />
+								<div class="flex gap-2">
+									<USelect
+										v-if="llmModelOptions.length > 0"
+										v-model="form.llm.model"
+										:items="llmModelOptions"
+										class="flex-1"
+									/>
+									<UInput v-else v-model="form.llm.model" placeholder="gpt-4o / claude-3-5-sonnet-..." class="flex-1" />
+									<UButton
+										variant="soft"
+										:loading="llmFetchingModels"
+										:disabled="!form.llm.baseUrl || !form.llm.apiKey"
+										icon="i-lucide-download"
+										@click="onFetchModels"
+									/>
+								</div>
 							</div>
 							<div>
 								<label class="mb-1 block text-sm">最大输出 Token</label>

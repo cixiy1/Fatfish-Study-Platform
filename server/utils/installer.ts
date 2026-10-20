@@ -80,18 +80,21 @@ function resolveLlmConfig(input: InstallLlmInput) {
 	const provider = input.provider
 	let baseUrl = input.baseUrl ?? ""
 	let model = input.model
+	let apiFormat = input.apiFormat ?? "openai"
 
 	if (provider !== "custom" && provider in LLM_PROVIDER_DEFAULTS) {
 		const d = LLM_PROVIDER_DEFAULTS[provider as Exclude<typeof provider, "custom">]
 		if (!baseUrl) baseUrl = d.baseUrl
+		apiFormat = d.apiFormat
 	}
 
 	return {
 		provider,
+		apiFormat,
 		baseUrl,
 		apiKey: input.apiKey,
 		model,
-		maxTokens: input.maxTokens ?? 4096,
+		maxTokens: input.maxTokens ?? 8192,
 	}
 }
 

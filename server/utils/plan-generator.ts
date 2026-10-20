@@ -48,9 +48,9 @@ const CHUNK_SIZE = 3
 /** 块间并发上限 */
 const CONCURRENCY = 2
 /** 整套资料的总时间预算，超了就降级，不让请求一直挂着 */
-export const DEFAULT_BUDGET_MS = 150_000
+export const DEFAULT_BUDGET_MS = 300_000
 /** 单块超时：一块写 3 篇，给足时间但别无限等 */
-const CHUNK_TIMEOUT_MS = 60_000
+const CHUNK_TIMEOUT_MS = 120_000
 
 const DIFFICULTIES = ["beginner", "intermediate", "advanced"] as const
 
@@ -122,6 +122,7 @@ function validateChunk(value: unknown, skills: PlanSkill[]): PlanMaterial[] {
 	}
 
 	const result: PlanMaterial[] = []
+	let invalidCount = 0
 
 	for (const [position, item] of raw.entries()) {
 		const material = asRecord(item)
@@ -129,19 +130,32 @@ function validateChunk(value: unknown, skills: PlanSkill[]): PlanMaterial[] {
 		const skill = skills[index - 1]
 		if (!skill) continue
 
-		result.push({
-			skillId: skill.id,
-			title: str(material.title, 2, 40, "title"),
-			summary: str(material.summary, 5, 120, "summary"),
-			objectives: strArray(material.objectives, 1, 5, 60, "objectives"),
-			content: str(material.content, 80, 6000, "content"),
-			minutes: clampInt(material.minutes, 5, 60, 15),
-			difficulty: oneOf(material.difficulty, DIFFICULTIES, difficultyOf(skill.level)),
-			origin: "model",
-		})
+		try {
+			result.push({
+				skillId: skill.id,
+				title: str(material.title, 2, 40, "title"),
+				summary: str(material.summary, 5, 120, "summary"),
+				objectives: strArray(material.objectives, 1, 5, 60, "objectives"),
+				content: str(material.content, 80, 6000, "content"),
+				minutes: clampInt(material.minutes, 5, 60, 15),
+				difficulty: oneOf(material.difficulty, DIFFICULTIES, difficultyOf(skill.level)),
+				origin: "model",
+			})
+		} catch (error) {
+			invalidCount += 1
+			console.warn(
+				`[plan-generator] skill ${skill.id} (${skill.name}) validation failed:`
+				+ ` ${error instanceof Error ? error.message : "unknown"}`,
+			)
+		}
 	}
 
-	if (result.length === 0) throw new LlmFormatError("materials 全部无效")
+	if (result.length === 0) {
+		throw new LlmFormatError(`materials 全部无效（${invalidCount} 个校验失败）`)
+	}
+	if (invalidCount > 0) {
+		console.warn(`[plan-generator] chunk partial success: ${result.length} ok, ${invalidCount} invalid`)
+	}
 	return result
 }
 
@@ -247,7 +261,7 @@ export async function generatePlanMaterials(
 			const res = await chatJson<PlanMaterial[]>({
 				messages: buildMessages(chunk, ctx),
 				temperature: 0.5,
-				maxTokens: 3200,
+				maxTokens: 8000,
 				timeoutMs: CHUNK_TIMEOUT_MS,
 				maxAttempts: 2,
 				tag: `plan:${chunk.map((s) => s.id).join(",")}`,

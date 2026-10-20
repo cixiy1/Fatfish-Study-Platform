@@ -102,26 +102,36 @@ export interface TestSmtpResponse {
 }
 
 /** 大模型提供商 */
-export type LlmProvider = "openai" | "anthropic" | "custom"
+export type LlmProvider = "openai" | "anthropic" | "deepseek" | "qwen" | "glm" | "maas" | "moonshot" | "custom"
+
+/** API 兼容格式 */
+export type LlmApiFormat = "openai" | "anthropic"
 
 /** 大模型配置（存 settings 表，apiKey 加密） */
 export interface LlmConfig {
-	/** 提供商类型，custom 表示兼容 OpenAI 格式的自定义端点 */
+	/** 提供商类型，custom 表示自定义端点 */
 	provider: LlmProvider
-	/** API Base URL（openai 默认 https://api.openai.com/v1，anthropic 默认 https://api.anthropic.com/v1） */
+	/** API 兼容格式（openai 用 /chat/completions，anthropic 用 /messages） */
+	apiFormat: LlmApiFormat
+	/** API Base URL */
 	baseUrl: string
 	/** API Key（加密存储） */
 	apiKey: string
-	/** 模型名称（如 gpt-4o、claude-3-5-sonnet-20241022） */
+	/** 模型名称 */
 	model: string
 	/** 最大输出 token 数 */
 	maxTokens: number
 }
 
 /** 大模型提供商默认配置 */
-export const LLM_PROVIDER_DEFAULTS: Record<Exclude<LlmProvider, "custom">, { baseUrl: string, model: string }> = {
-	openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-4o" },
-	anthropic: { baseUrl: "https://api.anthropic.com/v1", model: "claude-3-5-sonnet-20241022" },
+export const LLM_PROVIDER_DEFAULTS: Record<Exclude<LlmProvider, "custom">, { baseUrl: string, model: string, apiFormat: LlmApiFormat }> = {
+	openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-4o", apiFormat: "openai" },
+	anthropic: { baseUrl: "https://api.anthropic.com/v1", model: "claude-3-5-sonnet-20241022", apiFormat: "anthropic" },
+	deepseek: { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", apiFormat: "openai" },
+	qwen: { baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus", apiFormat: "openai" },
+	glm: { baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-plus", apiFormat: "openai" },
+	maas: { baseUrl: "https://maas-api.cn-east-3.myhuaweicloud.com/v1", model: "DeepSeek-R1", apiFormat: "openai" },
+	moonshot: { baseUrl: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k", apiFormat: "openai" },
 }
 
 /** 大模型测试请求 */

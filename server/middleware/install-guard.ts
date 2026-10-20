@@ -11,9 +11,10 @@ export default defineEventHandler((event) => {
 
 	const path = event.path
 
-	// 放行：安装接口、健康检查、Nitro 内部与静态资源
+	// 放行：安装接口、大模型拉取（install 向导中需要）、健康检查、Nitro 内部与静态资源
 	if (
 		path.startsWith("/api/install/")
+		|| path === "/api/admin/fetch-models"
 		|| path === "/api/health"
 		|| path.startsWith("/_")
 		|| path.startsWith("/__")

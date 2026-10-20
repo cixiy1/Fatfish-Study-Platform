@@ -2,7 +2,7 @@
  * 安装向导相关共享类型。
  */
 
-import type { SmtpConfig, OAuthPlatformCredentials, LlmProvider } from "./auth"
+import type { SmtpConfig, OAuthPlatformCredentials, LlmProvider, LlmApiFormat } from "./auth"
 
 export interface InstallStatusResponse {
 	installed: boolean
@@ -46,6 +46,8 @@ export interface InstallOAuthInput {
 /** 安装时必须填写的大模型配置（平台的 AI 功能全部依赖它） */
 export interface InstallLlmInput {
 	provider: LlmProvider
+	/** 自定义时选择兼容协议格式 */
+	apiFormat?: LlmApiFormat
 	baseUrl?: string
 	apiKey: string
 	model: string

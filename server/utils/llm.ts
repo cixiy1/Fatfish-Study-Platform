@@ -74,8 +74,8 @@ const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_MAX_TOKENS = 1200
 const ANTHROPIC_VERSION = "2023-06-01"
 
-function isAnthropic(provider: string): boolean {
-	return provider === "anthropic"
+function isAnthropicFormat(config: LlmConfig): boolean {
+	return config.apiFormat === "anthropic"
 }
 
 /** 拼接端点，兼容用户在 baseUrl 里已经填了完整路径的情况 */
@@ -135,7 +135,7 @@ function buildRequest(
 	messages: LlmMessage[],
 	options: { temperature?: number, maxTokens?: number, json?: boolean } = {},
 ): LlmRequest {
-	const anthropic = isAnthropic(config.provider)
+	const anthropic = isAnthropicFormat(config)
 	const endpoint = resolveEndpoint(config.baseUrl, anthropic ? "/messages" : "/chat/completions")
 	const maxTokens = Math.min(options.maxTokens ?? DEFAULT_MAX_TOKENS, config.maxTokens || DEFAULT_MAX_TOKENS)
 	const temperature = options.temperature ?? 0.4

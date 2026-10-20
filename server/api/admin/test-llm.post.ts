@@ -34,7 +34,24 @@ export default defineEventHandler(async (event) => {
 		}
 		return response
 	} catch (error) {
-		const message = error instanceof Error ? error.message : "请求失败"
-		throw createError({ statusCode: 502, message: `大模型请求失败: ${message}` })
+		throw createError({ statusCode: 502, message: `大模型请求失败: ${extractLlmError(error)}` })
 	}
 })
+
+/** 从大模型 API 错误响应中提取可读信息 */
+function extractLlmError(error: unknown): string {
+	// ofetch 错误：{ data: { error: { message } } } 或 { data: { error: "msg" } }
+	const data = (error as { data?: Record<string, unknown> })?.data
+	if (data) {
+		const err = data.error
+		if (typeof err === "object" && err !== null) {
+			const msg = (err as { message?: string }).message
+			if (msg) return msg
+		}
+		if (typeof err === "string") return err
+		const msg = (data as { message?: string }).message
+		if (msg) return msg
+	}
+	if (error instanceof Error) return error.message
+	return "未知错误"
+}

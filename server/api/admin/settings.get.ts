@@ -34,6 +34,7 @@ export default defineEventHandler((event) => {
 		llm: llm
 			? {
 					provider: llm.provider,
+					apiFormat: llm.apiFormat,
 					baseUrl: llm.baseUrl,
 					apiKey: null,
 					model: llm.model,

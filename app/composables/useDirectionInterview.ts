@@ -31,9 +31,11 @@ export function useDirectionInterview() {
   const hasStarted = computed(() => history.value.length > 0)
 
   function saveDraft() {
-    if (!finished.value || typeof sessionStorage === "undefined") return
+    if (!finished.value) return
+    const store = safeStorage()
+    if (!store) return
     try {
-      sessionStorage.setItem(DRAFT_KEY, JSON.stringify({
+      store.setItem(DRAFT_KEY, JSON.stringify({
         directions: directions.value,
         token: token.value,
         profile: profile.value,
@@ -44,9 +46,10 @@ export function useDirectionInterview() {
   }
 
   function restoreDraft(): boolean {
-    if (typeof sessionStorage === "undefined") return false
+    const store = safeStorage()
+    if (!store) return false
     try {
-      const raw = sessionStorage.getItem(DRAFT_KEY)
+      const raw = store.getItem(DRAFT_KEY)
       if (!raw) return false
       const data = JSON.parse(raw) as {
         directions?: DirectionCandidate[]
@@ -65,9 +68,10 @@ export function useDirectionInterview() {
   }
 
   function clearDraft() {
-    if (typeof sessionStorage === "undefined") return
+    const store = safeStorage()
+    if (!store) return
     try {
-      sessionStorage.removeItem(DRAFT_KEY)
+      store.removeItem(DRAFT_KEY)
     } catch {
       // 忽略
     }

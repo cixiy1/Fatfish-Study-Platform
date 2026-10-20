@@ -56,15 +56,17 @@ function mergeOAuthCredentials(input: Partial<OAuthCredentials>): OAuthCredentia
 	return result
 }
 
-/** 根据 provider 解析 baseUrl（非 custom 时用默认值） */
+/** 根据 provider 解析 baseUrl 和 apiFormat（非 custom 时用默认值） */
 function resolveLlmFields(input: Partial<LlmConfig> & { provider: LlmProvider }): LlmConfig | null {
 	const provider = input.provider
 	let baseUrl = input.baseUrl ?? ""
 	let model = input.model ?? ""
+	let apiFormat = input.apiFormat ?? "openai"
 
 	if (provider !== "custom" && provider in LLM_PROVIDER_DEFAULTS) {
 		const d = LLM_PROVIDER_DEFAULTS[provider as Exclude<LlmProvider, "custom">]
 		if (!baseUrl) baseUrl = d.baseUrl
+		apiFormat = d.apiFormat
 	}
 
 	if (!model) return null
@@ -76,10 +78,11 @@ function resolveLlmFields(input: Partial<LlmConfig> & { provider: LlmProvider })
 
 	return {
 		provider,
+		apiFormat,
 		baseUrl,
 		apiKey,
 		model,
-		maxTokens: input.maxTokens ?? 4096,
+		maxTokens: input.maxTokens ?? 8192,
 	}
 }
 
