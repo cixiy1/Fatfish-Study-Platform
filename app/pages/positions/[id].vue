@@ -271,7 +271,7 @@ onBeforeUnmount(() => {
       <!-- AI 流式分析中 -->
       <div v-if="analyzing" class="mb-6 rounded-xl border border-primary/30 bg-primary/5 p-5">
         <div class="mb-3 flex items-center gap-2">
-          <div class="size-2 animate-pulse rounded-full bg-primary" />
+          <UIcon name="i-lucide-brain" class="size-4 animate-pulse text-primary" />
           <span class="text-sm font-medium">大模型正在分析技能掌握情况…</span>
         </div>
         <div v-if="streamingDisplay" class="whitespace-pre-wrap text-sm leading-relaxed text-muted">

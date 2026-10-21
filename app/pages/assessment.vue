@@ -199,14 +199,13 @@ onMounted(async () => {
     <!-- 出题中 -->
     <div v-if="phase === 'generating'" class="mx-auto max-w-2xl">
       <div class="rounded-xl border border-default p-6">
-        <div class="mb-4 flex items-center gap-3">
-          <div class="size-3 animate-pulse rounded-full bg-primary" />
-          <span class="text-sm font-medium">
+        <div class="mb-4">
+          <p class="text-sm font-medium">
             {{ activeDirection ? `大模型正在为「${activeDirection.name}」定制测评题目…` : '大模型正在为你定制测评题目…' }}
-          </span>
+          </p>
         </div>
         <div v-if="streamDisplay" class="min-h-[80px] whitespace-pre-wrap text-sm leading-relaxed text-muted">
-          {{ streamDisplay }}<span class="animate-pulse text-primary">▌</span>
+          {{ streamDisplay }}
         </div>
         <div v-else class="flex items-center justify-center gap-2 py-6 text-muted">
           <UIcon name="i-lucide-brain" class="size-5 animate-pulse" />
@@ -215,11 +214,11 @@ onMounted(async () => {
       </div>
     </div>
 
-    <!-- 分析中 -->
+    <!-- 分析中：判断类，用大脑图标 -->
     <div v-else-if="phase === 'analyzing'" class="mx-auto max-w-2xl">
       <div class="rounded-xl border border-default p-6">
         <div class="mb-4 flex items-center gap-3">
-          <div class="size-3 animate-pulse rounded-full bg-primary" />
+          <UIcon name="i-lucide-brain" class="size-4 animate-pulse text-primary" />
           <span class="text-sm font-medium">大模型正在分析你的作答…</span>
         </div>
         <div v-if="streamDisplay" class="min-h-[120px] whitespace-pre-wrap text-sm leading-relaxed text-muted">
