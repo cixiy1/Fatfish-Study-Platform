@@ -59,7 +59,11 @@ const elapsed = computed(() => {
   width: 6%;
   border-radius: 9999px;
   background: var(--ui-primary);
-  animation: ai-ink-grow 3.4s steps(16, end) infinite;
+  /*
+   * 走得比模型慢：原来 3.4s 就冲到 93%，模型还在思考时进度条已经「跑完」，
+   * 看起来像卡住。12s 走完一轮，长任务不会显得作假，短任务也来不及走满。
+   */
+  animation: ai-ink-grow 12s steps(32, end) infinite;
 }
 
 @keyframes ai-ink-grow {

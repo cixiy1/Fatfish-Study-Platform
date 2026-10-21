@@ -2,6 +2,8 @@
  * 学习方向访谈相关的共享类型（服务端与前端共用）。
  */
 
+import type { AssessmentQuestion } from "#shared/types/assessment"
+
 /** 目录外的新技能点（学习平台不限定领域，模型可以现场提出） */
 export interface DirectionNewSkill {
 	name: string
@@ -46,7 +48,11 @@ export interface DirectionInterviewResponse {
 	done: boolean
 	/** 已经问过几轮 */
 	turn: number
+	/** 本轮的题目（多题型：单选/多选/填空/表单/自评/开放） */
+	ask?: AssessmentQuestion
+	/** 题干纯文本（已去掉 [[n]] 空位标记），写进对话记录用 */
 	question?: string
+	/** 兼容旧前端：仅单/多选题有值 */
 	options?: string[]
 	profile: DirectionProfile
 	directions?: DirectionCandidate[]

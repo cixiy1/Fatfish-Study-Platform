@@ -100,6 +100,16 @@ export function countBlankSlots(question: string): number {
 }
 
 /**
+ * 题干转纯文本。
+ *
+ * 填空题的题干里带 `[[1]]` 挖空标记，直接塞进对话记录或提示词会让模型
+ * 看到一串方括号；统一换成下划线占位，阅读和回传都自然。
+ */
+export function plainQuestion(question: AssessmentQuestion): string {
+	return question.question.replace(/\[\[\d+\]\]/g, "______").replace(/[ \t]+/g, " ").trim()
+}
+
+/**
  * 把模型返回的任意 JSON 项规范化成一道题。
  *
  * 返回 null 表示这道题不可用（缺题干、选项不够、表单没字段……），

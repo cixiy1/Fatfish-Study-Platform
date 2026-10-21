@@ -32,10 +32,11 @@ const { user, resolveUser } = useAuthSession()
 
 const {
   history,
-  question,
-  options,
+  ask,
+  streamText,
   directions,
   token,
+  turn,
   loading,
   mock,
   error,
@@ -43,6 +44,8 @@ const {
   llmBlocked: interviewBlocked,
   start,
   answer,
+  skip,
+  retry,
   reset,
   restoreDraft,
   clearDraft,
@@ -178,9 +181,14 @@ function goGoal() {
   phase.value = "goal"
 }
 
+/** 选了时长不立刻跳转：自定义输入需要时间，统一用底部「下一步」推进 */
 function pickMinutes(value: number | null) {
   if (!value) return
   minutes.value = value
+}
+
+function goConfirm() {
+  if (!minutes.value) return
   phase.value = "confirm"
 }
 
@@ -346,8 +354,8 @@ const directionSkillCount = computed(() => {
 </script>
 
 <template>
-  <h1 class="sr-only">制定学习计划</h1>
   <PlanStepper :step="step" :total="4" :can-back="canBack" @back="back">
+    <h1 class="sr-only">制定学习计划</h1>
     <PlanStepLlmRequired
       v-if="needsLlm"
       :reason="llmReasonText || error"
@@ -361,11 +369,14 @@ const directionSkillCount = computed(() => {
     <PlanStepInterview
       v-else-if="phase === 'interview'"
       :messages="history"
-      :question="question"
-      :options="options"
+      :ask="ask"
+      :stream-text="streamText"
+      :turn="turn"
       :loading="loading"
       :error="error"
       @answer="answer"
+      @skip="skip"
+      @retry="retry"
     />
 
     <!-- 访谈失败时的兜底入口，不影响主流程 -->
@@ -444,6 +455,15 @@ const directionSkillCount = computed(() => {
         label="下一步"
         icon="i-lucide-arrow-right"
         @click="goGoal"
+      />
+      <UButton
+        v-if="!needsLlm && phase === 'goal'"
+        block
+        size="lg"
+        :disabled="!minutes"
+        label="下一步"
+        icon="i-lucide-arrow-right"
+        @click="goConfirm"
       />
     </template>
   </PlanStepper>

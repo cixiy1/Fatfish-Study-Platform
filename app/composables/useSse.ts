@@ -11,6 +11,8 @@ import { parseSseFrames } from "~/utils/sse-parse"
  */
 
 /** 事件处理器：键为事件名，值为接收已解析 data 的回调 */
+// 各事件的 data 形状由服务端约定，调用方按事件名自己收窄，这里只能用 any 承接
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type SseHandlers = Record<string, ((data: any) => void) | undefined>
 
 export interface ConsumeOptions {
@@ -49,9 +51,11 @@ export async function consumeSse(
 		} catch {
 			// 读不到就算了
 		}
-		throw new Error(detail ? `${detail}（HTTP ${response.status}）` : `请求失败: ${response.status}`)
-	}
-	if (!response.body) {
+		// 把状态码挂在错误上：调用方要靠它区分「未配置大模型 503」和普通网络错误
+		const error = new Error(detail ? `${detail}（HTTP ${response.status}）` : `请求失败: ${response.status}`)
+		;(error as Error & { status?: number }).status = response.status
+		throw error
+	}	if (!response.body) {
 		throw new Error("响应不支持流式读取")
 	}
 
