@@ -303,7 +303,7 @@ onMounted(async () => {
 
     <!-- 答题页 -->
     <div v-else-if="phase === 'quiz' && questions.length > 0" class="mx-auto max-w-2xl">
-      <UProgress :value="progress" class="mb-6" />
+      <UProgress :model-value="progress" class="mb-6" />
       <p class="mb-4 text-sm text-muted">第 {{ currentStep + 1 }} / {{ questions.length }} 题</p>
 
       <UCard>

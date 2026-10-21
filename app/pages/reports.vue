@@ -153,7 +153,7 @@ function viewReport(report: Report) {
               <div v-for="(val, key) in skillBreakdown" :key="key" class="flex items-center gap-2">
                 <span class="w-16 shrink-0 truncate text-sm text-muted">{{ key }}</span>
                 <UProgress
-                  :value="val"
+                  :model-value="val"
                   :max="Math.max(...Object.values(skillBreakdown))"
                   class="flex-1"
                 />
