@@ -1,5 +1,6 @@
 import { findLearningPathItems, findPathItemForUser, findResourceById } from "../../../repositories/learning.repository"
 import { findUserByAccount } from "../../../repositories/user.repository"
+import { parseReferenceJson } from "../../../utils/refs"
 import { readSession } from "../../../utils/session"
 import { getDb } from "../../../utils/db"
 
@@ -61,6 +62,8 @@ export default defineEventHandler((event) => {
 					objectives: parseObjectives(resource.objectives),
 					content: resource.content,
 					duration: resource.duration,
+					// 参考来源：官方文档 / 标准 / 论文，学习者可点开原文核对
+					references: parseReferenceJson(resource.references_json),
 					// 只有生成来源的资料才带正文，外链资料页面要改成跳转
 					generated: resource.status === "ready" && Boolean(resource.content),
 				}

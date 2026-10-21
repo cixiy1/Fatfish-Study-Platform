@@ -16,6 +16,8 @@ import {
 	MAX_EVOLVE_PRUNE,
 	parseEvolveProposal,
 } from "../../../utils/skill-evolve"
+import { syncPathWithGraph } from "../../../utils/path-sync"
+import type { PathSyncResult } from "../../../utils/path-sync"
 
 /**
  * 技能图谱演进（流式）：POST /api/positions/:id/evolve.stream
@@ -161,6 +163,8 @@ export default defineEventHandler(async (event) => {
 				releveled: [],
 				reordered: 0,
 				pruned: [],
+				pathSync: null,
+				pathError: null,
 			})
 			return
 		}
@@ -190,10 +194,28 @@ export default defineEventHandler(async (event) => {
 			`[skill-evolve] user=${user.id} pos=${positionId} 新增 ${applied.added.length} 调级 ${applied.releveled.length} 重排 ${applied.reordered} 剪枝 ${applied.pruned.length}`,
 		)
 
+		// 图谱已经落库，先把改动推给前端，再去做最慢的一步：把学习路线拉齐
+		sse.write("graph", { applied: true, ...applied })
+
+		let pathSync: PathSyncResult | null = null
+		let pathError: string | null = null
+		try {
+			pathSync = await syncPathWithGraph(user.id, positionId, {
+				signal: sse.signal,
+				onEvent: (progress) => sse.write(progress.type, progress),
+			})
+		} catch (syncError) {
+			pathError = syncError instanceof Error ? syncError.message : "学习路线同步失败"
+			console.warn(`[skill-evolve] path sync failed user=${user.id} pos=${positionId} error=${pathError}`)
+			sse.write("path_error", { message: pathError })
+		}
+
 		sse.write("done", {
 			applied: true,
 			summary: proposal.summary,
 			...applied,
+			pathSync,
+			pathError,
 		})
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "演进失败"

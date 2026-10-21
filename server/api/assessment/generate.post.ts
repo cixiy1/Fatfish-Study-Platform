@@ -1,14 +1,11 @@
 import { randomUUID } from "node:crypto"
 import {
-	findAllSkills,
 	findAssessmentByType,
-	findAssessmentRecordsByUser,
 	findUserProfile,
-	findUserSkills,
 	insertDynamicQuestions,
-	parseProfileData,
 } from "../../repositories/learning.repository"
 import { findUserByAccount } from "../../repositories/user.repository"
+import { buildContextLines, resolveAssessmentContext } from "../../utils/assessment-context"
 import { chatStream } from "../../utils/llm"
 import { requireLlm } from "../../utils/llm-guard"
 import { readSession } from "../../utils/session"
@@ -17,15 +14,21 @@ import { openSse } from "../../utils/sse"
 /**
  * 动态出题（流式）：POST /api/assessment/generate
  *
- * 根据用户画像（学习目标、职业方向、已有技能、测评历史），
- * 让大模型生成个性化的能力测评题目。
- * 边输出边推送 SSE，完成后推送题目列表。
+ * 根据「当前学习方向」出题：方向名称、方向描述、该方向的技能图谱与掌握状态、
+ * 方向学习进度、该方向上次测评结论。
+ *
+ * 早期版本只读 profile.career_direction + 全量 user_skills，导致：
+ * 用户新增/切换方向后题目不变（永远考第一次选的那个方向），且技能混着别的方向。
  */
 
 interface GeneratedQuestion {
 	question: string
 	options: string[]
 	category: string
+}
+
+interface GenerateBody {
+	positionId?: number | null
 }
 
 function tryParseQuestions(text: string): GeneratedQuestion[] | null {
@@ -62,57 +65,41 @@ export default defineEventHandler(async (event) => {
 
 	requireLlm()
 
-	// 动态题要挂在具体测评下才落得了库；取不到就退化成「只出题不落库」
+	const body = await readBody<GenerateBody>(event).catch(() => null)
+	const requested = Number(body?.positionId ?? 0)
+
+	// 方向解析放在开流之前：越权/方向不存在要走正常 HTTP 错误
+	const ctx = resolveAssessmentContext(user.id, requested > 0 ? requested : null)
+
 	const assessment = findAssessmentByType("career")
-
 	const profile = findUserProfile(user.id)
-	const profileData = parseProfileData(profile?.profile_data ?? null)
-	const userSkills = findUserSkills(user.id)
-	const allSkills = findAllSkills()
-	const assessmentRecords = findAssessmentRecordsByUser(user.id)
-
-	const skillNames = userSkills.length > 0
-		? userSkills.map((us) => {
-			const skill = allSkills.find((s) => s.id === us.skill_id)
-			return skill ? `${skill.name}（${us.status}）` : null
-		}).filter(Boolean).join("、")
-		: "暂无已记录的技能"
-
-	const goal = profile?.learning_goal
-		?? (profileData.aiDirection as { profile?: { goal?: string | null } })?.profile?.goal
-		?? "未设定"
-	const direction = profile?.career_direction ?? "未设定"
-	const profession = profile?.profession ?? "未填写"
-	const education = profile?.education ?? "未填写"
-	const experience = profile?.experience_years ? `${profile.experience_years} 年` : "未填写"
-
-	const lastAssessment = assessmentRecords[0]?.result_data?.slice(0, 200) ?? "无"
 
 	const messages = [
 		{
 			role: "system" as const,
 			content: [
 				"你是能力测评设计师，为学习者量身定制测评题目。",
-				"要求：",
-				"1. 题目要基于学习者的目标、方向和已有技能，不要出无关的题。",
+				"硬性要求：",
+				"1. 题目必须全部围绕「本次测评的学习方向」出，只能考该方向技能图谱里的知识点。",
+				"   严禁出现其他方向/其他领域的内容（例：方向是「日语 N4」就不能考编程；方向是「Java 后端」就不能考英语语法）。",
 				"2. 每题 2~4 个选项，选项要具体、有区分度，不要「以上都对」。",
-				"3. 题目数量 6~8 题，覆盖基础认知、实操经验、学习偏好。",
-				"4. 先用自然语言说明出题思路（1~2 句），然后输出 JSON 数组，用 ```json 代码块包裹。",
+				"3. 题目数量 6~8 题，覆盖基础认知、实操经验、学习偏好，难度按自评水平与方向进度匹配。",
+				"4. 若给了技能图谱与掌握状态，题目要能区分「已掌握」和「还未掌握」，不要出全方向无关的通用题。",
+				"5. 先用自然语言说明出题思路（1~2 句，必须点明方向名），然后输出 JSON 数组，用 ```json 代码块包裹。",
 			].join("\n"),
 		},
 		{
 			role: "user" as const,
 			content: [
 				"学习者信息：",
-				`- 学习目标：${goal}`,
-				`- 职业方向：${direction}`,
-				`- 职业：${profession}`,
-				`- 学历：${education}`,
-				`- 经验：${experience}`,
-				`- 已有技能：${skillNames}`,
-				`- 上次测评：${lastAssessment}`,
+				...buildContextLines(ctx),
+				`- 职业：${profile?.profession ?? "未填写"}`,
+				`- 学历：${profile?.education ?? "未填写"}`,
+				`- 经验：${profile?.experience_years ? `${profile.experience_years} 年` : "未填写"}`,
 				"",
-				"请为这位学习者生成个性化测评题目。先说出题思路，然后输出 JSON：",
+				ctx.positionName
+					? `请为「${ctx.positionName}」这个方向生成个性化测评题目。先说出题思路，然后输出 JSON：`
+					: "请为这位学习者生成个性化测评题目。先说出题思路，然后输出 JSON：",
 				"```json",
 				'[{"question":"题目","options":["选项A","选项B","选项C"],"category":"分类"}]',
 				"```",
@@ -124,12 +111,19 @@ export default defineEventHandler(async (event) => {
 	let fullText = ""
 
 	try {
+		// 方向信息先推给前端：出题界面能立刻显示「正在为 X 方向出题」
+		sse.write("context", {
+			positionId: ctx.positionId,
+			positionName: ctx.positionName,
+			skillCount: ctx.skills.length,
+		})
+
 		for await (const chunk of chatStream({
 			messages,
 			temperature: 0.5,
 			maxTokens: 4096,
 			timeoutMs: 60_000,
-			tag: `assessment-gen:${user.id}`,
+			tag: `assessment-gen:${user.id}:${ctx.positionId ?? "none"}`,
 			signal: sse.signal,
 		})) {
 			fullText += chunk
@@ -140,7 +134,7 @@ export default defineEventHandler(async (event) => {
 
 		if (questions) {
 			// 动态题落库：分析时要按 batchId 取回「当时真正展示给用户的这套题」，
-			// 否则只能用种子题去配对答案，题数不一致会 400，一致也会错位
+			// 否则只能用种子题去配对答案；position_id 记住这套题属于哪个方向。
 			if (assessment) {
 				const batchId = randomUUID()
 				try {
@@ -148,15 +142,21 @@ export default defineEventHandler(async (event) => {
 						assessmentId: assessment.id,
 						userId: user.id,
 						batchId,
+						positionId: ctx.positionId,
 						questions,
 					})
-					sse.write("done", { questions, batchId })
+					sse.write("done", {
+						questions,
+						batchId,
+						positionId: ctx.positionId,
+						positionName: ctx.positionName,
+					})
 					return
 				} catch (storeError) {
 					console.warn(`[assessment] 动态题目落库失败 user=${user.id}`, storeError)
 				}
 			}
-			sse.write("done", { questions })
+			sse.write("done", { questions, positionId: ctx.positionId, positionName: ctx.positionName })
 		} else {
 			sse.write("error", { message: "题目生成失败，请重试" })
 		}

@@ -377,6 +377,30 @@ const MIGRATIONS: Migration[] = [
 			CREATE INDEX IF NOT EXISTS idx_lr_position ON learning_resources(position_id);
 		`,
 	},
+	{
+		version: 9,
+		name: "learning_resources_references",
+		sql: `
+			-- 每个学习节点附带的参考来源（官方文档 / 标准 / 论文 / 权威机构页面）。
+			-- 形如 [{"title":"Java SE API 文档","url":"https://docs.oracle.com/...","publisher":"Oracle","kind":"official","status":"ok"}]。
+			-- 列名不用 references：它是 SQL 关键字，容易在 SQL 解析上踩坑。
+			ALTER TABLE learning_resources ADD COLUMN references_json TEXT;
+		`,
+	},
+	{
+		version: 10,
+		name: "assessment_position_scope",
+		sql: `
+			-- 测评题与测评记录都要记住「考的是哪个学习方向」。
+			-- 此前出题只读 user_profiles.career_direction（首次选定的那个方向），
+			-- 用户后来新增/切换了方向，题目依旧是老方向的——能力测评与学习方向脱钩。
+			ALTER TABLE assessment_questions ADD COLUMN position_id INTEGER REFERENCES positions(id);
+			ALTER TABLE assessment_records ADD COLUMN position_id INTEGER REFERENCES positions(id);
+
+			CREATE INDEX IF NOT EXISTS idx_aq_position ON assessment_questions(position_id);
+			CREATE INDEX IF NOT EXISTS idx_ar_position ON assessment_records(user_id, position_id);
+		`,
+	},
 ]
 
 /** 幂等执行所有未应用的迁移 */

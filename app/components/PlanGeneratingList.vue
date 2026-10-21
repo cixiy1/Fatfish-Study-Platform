@@ -19,6 +19,8 @@ export interface GenRow {
     objectives: string[]
     minutes: number
     difficulty: string
+    /** 参考来源域名，如 oracle.com / developer.mozilla.org */
+    referenceHosts?: string[]
   }
   reason?: string
   attempt?: number
@@ -91,6 +93,17 @@ const difficultyLabel = (value: string) => {
                 <span>{{ row.material.minutes }} 分钟</span>
                 <UDivider orientation="vertical" class="h-3" />
                 <span>{{ difficultyLabel(row.material.difficulty) }}</span>
+              </div>
+
+              <!-- 引用来源：这一关参考了哪些官方文档 / 论文 -->
+              <div
+                v-if="row.material.referenceHosts && row.material.referenceHosts.length > 0"
+                class="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-muted"
+              >
+                <UIcon name="i-lucide-library" class="size-3.5" />
+                <span class="rounded bg-elevated px-1.5 py-0.5" v-for="host in row.material.referenceHosts" :key="host">
+                  {{ host }}
+                </span>
               </div>
             </div>
           </div>

@@ -35,10 +35,20 @@ interface ItemDetail {
     objectives: string[]
     content: string | null
     duration: number | null
+    references: Reference[]
     generated: boolean
   } | null
   prevId: number | null
   nextId: number | null
+}
+
+interface Reference {
+  title: string
+  url: string
+  publisher: string
+  kind: string
+  note: string
+  status: string
 }
 
 const fetcher = import.meta.server ? useRequestFetch() : $fetch
@@ -67,6 +77,56 @@ const { refresh } = useLearner()
 const toast = useToast()
 
 const completing = ref(false)
+
+// 参考来源的展示文案：让人一眼看出这是官方文档还是论文，而不是一堆可疑链接
+const KIND_LABEL: Record<string, string> = {
+  official: "官方文档",
+  academic: "学术/权威",
+  standard: "标准原文",
+  community: "社区",
+  other: "参考",
+}
+const KIND_COLOR: Record<string, "primary" | "success" | "warning" | "neutral"> = {
+  official: "primary",
+  academic: "success",
+  standard: "warning",
+  community: "neutral",
+  other: "neutral",
+}
+const kindLabel = (kind: string) => KIND_LABEL[kind] ?? "参考"
+const kindColor = (kind: string) => KIND_COLOR[kind] ?? "neutral"
+
+// 历史资料（引用功能上线前生成的）没有来源，可以就地为它补一批
+const refLoading = ref(false)
+const localReferences = ref<Reference[]>([])
+const shownReferences = computed<Reference[]>(
+  () => (localReferences.value.length > 0 ? localReferences.value : detail.value?.resource?.references ?? []),
+)
+
+async function fetchReferences() {
+  refLoading.value = true
+  try {
+    const res = await $fetch<{ references: Reference[] }>(
+      `/api/learning-path/item/${id}/references`,
+      { method: "POST" },
+    )
+    localReferences.value = res.references ?? []
+    toast.add({
+      title: `已补充 ${localReferences.value.length} 条参考来源`,
+      color: "success",
+      icon: "i-lucide-library",
+    })
+  } catch (err) {
+    const message = (err as { data?: { message?: string } })?.data?.message
+    toast.add({
+      title: "补充参考资料失败",
+      description: message || "请稍后重试",
+      color: "error",
+    })
+  } finally {
+    refLoading.value = false
+  }
+}
 
 // 本关追问：带上 pathItemId，服务端会把这一关的正文塞进上下文，
 // 否则模型不知道用户问的「这里」指的是哪一段
@@ -187,6 +247,61 @@ async function complete() {
       </UCard>
 
       <article class="lesson-body mt-6" v-html="contentHtml" />
+
+      <!-- 参考来源：正文是二手转述，原文在这里，点开就能核对 -->
+      <UCard v-if="shownReferences.length" class="mt-6">
+        <div class="mb-3 flex items-center gap-2">
+          <UIcon name="i-lucide-library" class="size-4 text-primary" />
+          <span class="text-sm font-medium">参考来源</span>
+          <span class="text-xs text-muted">共 {{ shownReferences.length }} 篇 · 由 AI 挑选，请以原文为准</span>
+        </div>
+        <ul class="space-y-1">
+          <li v-for="(ref, index) in shownReferences" :key="ref.url">
+            <a
+              :href="ref.url"
+              target="_blank"
+              rel="noopener noreferrer nofollow"
+              class="group -mx-2 flex items-start gap-2.5 rounded-lg p-2 transition-colors hover:bg-elevated"
+            >
+              <span class="mt-0.5 grid size-5 shrink-0 place-items-center rounded bg-elevated text-[11px] tabular-nums text-muted">
+                {{ index + 1 }}
+              </span>
+              <span class="min-w-0 flex-1">
+                <span class="flex items-center gap-1.5 text-sm font-medium group-hover:text-primary">
+                  <span class="truncate">{{ ref.title }}</span>
+                  <UIcon name="i-lucide-external-link" class="size-3 shrink-0 text-muted" />
+                </span>
+                <span class="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
+                  <UBadge :color="kindColor(ref.kind)" variant="soft" size="sm">
+                    {{ kindLabel(ref.kind) }}
+                  </UBadge>
+                  <span>{{ ref.publisher }}</span>
+                  <span v-if="ref.status === 'unreachable'" class="text-warning">· 暂时打不开</span>
+                </span>
+                <span v-if="ref.note" class="mt-1 block text-xs text-muted">{{ ref.note }}</span>
+              </span>
+            </a>
+          </li>
+        </ul>
+      </UCard>
+
+      <!-- 老资料没有引用：不用重写正文，几秒钟就能补一批 -->
+      <div
+        v-else-if="hasContent"
+        class="mt-6 flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-default px-4 py-3"
+      >
+        <UIcon name="i-lucide-library" class="size-4 text-muted" />
+        <span class="text-xs text-muted">本关还没有参考来源</span>
+        <UButton
+          size="xs"
+          variant="soft"
+          color="neutral"
+          :loading="refLoading"
+          label="AI 找参考资料"
+          icon="i-lucide-sparkles"
+          @click="fetchReferences"
+        />
+      </div>
 
       <p v-if="detail.resource" class="mt-4 text-xs text-muted">
         约 {{ detail.resource.duration ?? 15 }} 分钟 · 内容由 AI 按学习方向生成

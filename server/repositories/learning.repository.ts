@@ -81,6 +81,57 @@ export function updatePositionStatus(positionId: number, status: string): void {
 	getDb().prepare("UPDATE positions SET status = ? WHERE id = ?").run(status, positionId)
 }
 
+/**
+ * 用户「正在学」的方向：以 learning_paths 为准（有路径说明真的在学），
+ * 每个方向取最新一条路径，带上关卡进度。
+ *
+ * 能力测评的方向选择器用它——不能用 findAllPositions，
+ * 那会把全站种子岗位都列出来，等于让用户去测评没学过的方向。
+ */
+export function findStudyPositions(userId: number): {
+	id: number
+	name: string
+	category: string
+	description: string | null
+	icon: string | null
+	path_id: number
+	generation_status: string
+	item_count: number
+	completed_count: number
+	updated_at: string
+}[] {
+	return getDb()
+		.prepare(`
+			SELECT p.id, p.name, p.category, p.description, p.icon,
+			       lp.id AS path_id, lp.generation_status, lp.updated_at,
+			       COUNT(lpi.id) AS item_count,
+			       SUM(CASE WHEN lpi.status = 'completed' THEN 1 ELSE 0 END) AS completed_count
+			FROM positions p
+			JOIN learning_paths lp ON lp.id = (
+				SELECT x.id FROM learning_paths x
+				WHERE x.user_id = ? AND x.target_position_id = p.id AND x.status <> 'archived'
+				ORDER BY x.updated_at DESC, x.id DESC
+				LIMIT 1
+			)
+			LEFT JOIN learning_path_items lpi ON lpi.path_id = lp.id
+			WHERE p.status <> 'archived'
+			GROUP BY p.id, lp.id
+			ORDER BY lp.updated_at DESC, p.id
+		`)
+		.all(userId) as {
+			id: number
+			name: string
+			category: string
+			description: string | null
+			icon: string | null
+			path_id: number
+			generation_status: string
+			item_count: number
+			completed_count: number
+			updated_at: string
+		}[]
+}
+
 // --- 技能 ---
 
 /** 从方向上摘掉一个技能（只解绑，不删技能本身——它可能还挂在别的方向/路径上） */
@@ -193,12 +244,13 @@ export function insertDynamicQuestions(input: {
 	assessmentId: number
 	userId: number
 	batchId: string
+	positionId?: number | null
 	questions: { question: string, options: string[], category?: string }[]
 }): void {
 	const stmt = getDb().prepare(
 		`INSERT INTO assessment_questions
-		 (assessment_id, question, options, correct_index, category, sort_order, owner_user_id, batch_id, source)
-		 VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 'ai')`,
+		 (assessment_id, question, options, correct_index, category, sort_order, owner_user_id, batch_id, source, position_id)
+		 VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 'ai', ?)`,
 	)
 	const run = getDb().transaction(() => {
 		input.questions.forEach((q, index) => {
@@ -210,6 +262,7 @@ export function insertDynamicQuestions(input: {
 				index,
 				input.userId,
 				input.batchId,
+				input.positionId ?? null,
 			)
 		})
 	})
@@ -220,26 +273,35 @@ export function insertDynamicQuestions(input: {
  * 按批次取回某用户的一套动态题。
  *
  * 带 owner_user_id 条件，防止拿别人的批次拼答案。
+ * 选 position_id：分析阶段要用「出题时那个方向」做判定范围，
+ * 不能用当前方向（用户可能中途切换过）。
  */
-export function findQuestionsByBatch(batchId: string, userId: number): { id: number, question: string, options: string[], correct_index: number | null, category: string | null, sort_order: number }[] {
+export function findQuestionsByBatch(batchId: string, userId: number): { id: number, question: string, options: string[], correct_index: number | null, category: string | null, sort_order: number, position_id: number | null }[] {
 	const rows = getDb()
 		.prepare(
 			"SELECT * FROM assessment_questions WHERE batch_id = ? AND owner_user_id = ? ORDER BY sort_order",
 		)
-		.all(batchId, userId) as { id: number, question: string, options: string, correct_index: number | null, category: string | null, sort_order: number }[]
+		.all(batchId, userId) as { id: number, question: string, options: string, correct_index: number | null, category: string | null, sort_order: number, position_id: number | null }[]
 	return rows.map((r) => ({ ...r, options: JSON.parse(r.options) as string[] }))
 }
 
-export function createAssessmentRecord(userId: number, assessmentId: number, answers: number[], score: number, resultData: string): void {
+export function createAssessmentRecord(
+	userId: number,
+	assessmentId: number,
+	answers: number[],
+	score: number,
+	resultData: string,
+	positionId: number | null = null,
+): void {
 	getDb()
-		.prepare("INSERT INTO assessment_records (user_id, assessment_id, answers, score, result_data) VALUES (?, ?, ?, ?, ?)")
-		.run(userId, assessmentId, JSON.stringify(answers), score, resultData)
+		.prepare("INSERT INTO assessment_records (user_id, assessment_id, answers, score, result_data, position_id) VALUES (?, ?, ?, ?, ?, ?)")
+		.run(userId, assessmentId, JSON.stringify(answers), score, resultData, positionId)
 }
 
-export function findAssessmentRecordsByUser(userId: number): { id: number, assessment_id: number, score: number, result_data: string | null, created_at: string }[] {
+export function findAssessmentRecordsByUser(userId: number): { id: number, assessment_id: number, score: number, result_data: string | null, created_at: string, position_id: number | null }[] {
 	return getDb()
-		.prepare("SELECT id, assessment_id, score, result_data, created_at FROM assessment_records WHERE user_id = ? ORDER BY created_at DESC")
-		.all(userId) as { id: number, assessment_id: number, score: number, result_data: string | null, created_at: string }[]
+		.prepare("SELECT id, assessment_id, score, result_data, created_at, position_id FROM assessment_records WHERE user_id = ? ORDER BY created_at DESC")
+		.all(userId) as { id: number, assessment_id: number, score: number, result_data: string | null, created_at: string, position_id: number | null }[]
 }
 
 // --- 用户画像 ---
@@ -415,11 +477,12 @@ export function findResourceById(resourceId: number): {
 	source: string
 	status: string
 	model: string | null
+	references_json: string | null
 } | null {
 	return (getDb()
 		.prepare(`
 			SELECT id, title, type, url, difficulty, description, summary, objectives,
-			       content, duration, source, status, model
+			       content, duration, source, status, model, references_json
 			FROM learning_resources
 			WHERE id = ?
 		`)
@@ -437,6 +500,7 @@ export function findResourceById(resourceId: number): {
 		source: string
 		status: string
 		model: string | null
+		references_json: string | null
 	} | undefined) ?? null
 }
 
@@ -451,12 +515,14 @@ export function insertGeneratedResource(input: {
 	estimatedMinutes: number
 	model: string
 	positionId?: number | null
+	/** 参考来源（已 JSON 序列化）；没有就是 null */
+	references?: string | null
 }): number {
 	return Number(getDb()
 		.prepare(`
 			INSERT INTO learning_resources
-				(title, type, url, skill_id, difficulty, description, duration, content, summary, objectives, source, status, generated_at, model, position_id)
-			VALUES (?, 'article', NULL, ?, ?, ?, ?, ?, ?, ?, 'ai', 'ready', datetime('now'), ?, ?)
+				(title, type, url, skill_id, difficulty, description, duration, content, summary, objectives, source, status, generated_at, model, position_id, references_json)
+			VALUES (?, 'article', NULL, ?, ?, ?, ?, ?, ?, ?, 'ai', 'ready', datetime('now'), ?, ?, ?)
 		`)
 		.run(
 			input.title,
@@ -469,6 +535,7 @@ export function insertGeneratedResource(input: {
 			JSON.stringify(input.objectives),
 			input.model,
 			input.positionId ?? null,
+			input.references ?? null,
 		).lastInsertRowid)
 }
 
@@ -486,6 +553,7 @@ export function updateGeneratedResource(id: number, input: {
 	difficulty: string
 	estimatedMinutes: number
 	model: string
+	references?: string | null
 }): void {
 	getDb()
 		.prepare(`
@@ -493,7 +561,8 @@ export function updateGeneratedResource(id: number, input: {
 				title = ?, difficulty = ?, description = ?, duration = ?,
 				content = ?, summary = ?, objectives = ?,
 				source = 'ai', status = 'ready',
-				generated_at = datetime('now'), model = ?
+				generated_at = datetime('now'), model = ?,
+				references_json = COALESCE(?, references_json)
 			WHERE id = ?
 		`)
 		.run(
@@ -505,8 +574,16 @@ export function updateGeneratedResource(id: number, input: {
 			input.summary,
 			JSON.stringify(input.objectives),
 			input.model,
+			input.references ?? null,
 			id,
 		)
+}
+
+/** 只更新参考来源（给历史资料补引用时用，不动正文） */
+export function updateResourceReferences(id: number, referencesJson: string | null): void {
+	getDb()
+		.prepare("UPDATE learning_resources SET references_json = ? WHERE id = ?")
+		.run(referencesJson, id)
 }
 
 /** 生成失败时降级为外链资料，保证路径一定有可点的东西 */
@@ -540,13 +617,14 @@ export function addLearningPathItem(
 	sortOrder: number,
 	itemType = "lesson",
 	estimatedMinutes: number | null = null,
-): void {
-	getDb()
+): number {
+	return Number(getDb()
 		.prepare(`
 			INSERT INTO learning_path_items (path_id, skill_id, resource_id, sort_order, item_type, estimated_minutes)
 			VALUES (?, ?, ?, ?, ?, ?)
 		`)
 		.run(pathId, skillId, resourceId, sortOrder, itemType, estimatedMinutes)
+		.lastInsertRowid)
 }
 
 /** 更新路径的生成状态（generating / ready / degraded / failed） */
@@ -817,4 +895,28 @@ export function normalizePathOrder(pathId: number): void {
 		rows.forEach((row, index) => update.run(index, row.id))
 	})
 	run()
+}
+
+/** 删掉单个关卡（图谱演进后清理已不属于该方向的节点用） */
+export function deletePathItem(itemId: number): void {
+	getDb().prepare("DELETE FROM learning_path_items WHERE id = ?").run(itemId)
+}
+
+/** 按给定顺序一次性重排关卡；ids 之外的关卡保持不动 */
+export function reorderPathItems(pathId: number, itemIds: number[]): void {
+	if (itemIds.length === 0) return
+	const db = getDb()
+	const update = db.prepare("UPDATE learning_path_items SET sort_order = ? WHERE id = ? AND path_id = ?")
+	const run = db.transaction(() => {
+		itemIds.forEach((itemId, index) => update.run(index, itemId, pathId))
+	})
+	run()
+}
+
+/** 关卡数（图谱同步时判断"这条路径是不是空的"） */
+export function countPathItems(pathId: number): number {
+	const row = getDb()
+		.prepare("SELECT COUNT(*) AS c FROM learning_path_items WHERE path_id = ?")
+		.get(pathId) as { c: number }
+	return row.c
 }

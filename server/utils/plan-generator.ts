@@ -12,6 +12,8 @@
 import { insertGeneratedResource, updateGeneratedResource } from "../repositories/learning.repository"
 import { chatJson, isLlmMockForced, mapLimit } from "./llm"
 import { asRecord, clampInt, LlmFormatError, oneOf, str, strArray } from "./llm-json"
+import { parseReferences, referenceHosts, verifyReferences } from "./refs"
+import type { Reference } from "./refs"
 
 export interface PlanSkill {
 	id: number
@@ -32,6 +34,8 @@ export interface PlanMaterial {
 	content: string
 	minutes: number
 	difficulty: Difficulty
+	/** 参考来源：官方文档 / 标准原文 / 论文等，供学习者核对原文 */
+	references: Reference[]
 	/** model = 真模型生成，stub = 本地模板兜底 */
 	origin: "model" | "stub"
 }
@@ -62,6 +66,8 @@ function summarizeMaterial(material: PlanMaterial) {
 		objectives: material.objectives,
 		minutes: material.minutes,
 		difficulty: material.difficulty,
+		/** 只带域名，让卡片能立刻显示「参考了 MDN / Oracle」这类角标 */
+		referenceHosts: referenceHosts(material.references),
 	}
 }
 
@@ -112,6 +118,14 @@ function buildMessages(skills: PlanSkill[], ctx: GenerateContext) {
 				// 模型看到「短篇阅读」这类通用技能名时容易脑补错语言
 				"全文用简体中文写作。例句、例词等外语素材只能是「学习方向」对应的那一门外语：",
 				"英语类方向只出现英语示例，绝不能出现日语/韩语/法语等其他外语；语言类方向必须围绕该方向的语种展开。",
+				// 参考来源：让学习者能点到原文核对，而不是只能相信这篇转述
+				"每关必须给 2~4 条真实存在、能直接打开的参考来源（references），按方向挑来源类型：",
+				"· 编程/框架/工具：官方文档优先（docs.oracle.com、docs.python.org、developer.mozilla.org、react.dev 等），标准看 w3.org、ietf.org；",
+				"· 健身/健康/医学：权威机构与同行评议优先（who.int、cdc.gov、pubmed.ncbi.nlm.nih.gov、doi.org、acsm.org 等）；",
+				"· 语言考试：官方考试机构或权威语料（ets.org、cambridge.org、britishcouncil.org）；",
+				"· 其他领域：行业标准组织、主管部门官网或权威出版社的具体页面。",
+				"链接要给到具体页面（带路径），不能只丢首页；绝对不许编造 URL 或编号——不确定就少给，宁可为 0 条也不要假链接。",
+				"正文可在对应句子末尾用 [1][2] 标注引用的参考序号。",
 				"只输出 JSON 对象，不要 Markdown 代码块包裹。",
 				"每个技能点的 content 必须不少于 400 字，否则视为不合格。",
 				// 让测评结果实质影响内容难度，而不只是在 prompt 里出现装样子
@@ -145,7 +159,7 @@ function buildMessages(skills: PlanSkill[], ctx: GenerateContext) {
 				list,
 				"",
 				"输出格式：",
-				'{"materials":[{"index":1,"title":"关卡标题（12字内，动词开头）","summary":"一句话说明这关能干什么","objectives":["学完能做到的事","..."],"content":"Markdown正文","minutes":20,"difficulty":"beginner"}]}',
+				'{"materials":[{"index":1,"title":"关卡标题（12字内，动词开头）","summary":"一句话说明这关能干什么","objectives":["学完能做到的事","..."],"content":"Markdown正文","minutes":20,"difficulty":"beginner","references":[{"title":"页面标题","url":"https://具体页面","publisher":"机构名","note":"对应正文哪部分"}]}]}',
 				"",
 				"字段要求：",
 				"- index：对应上面的编号，从 1 开始",
@@ -157,6 +171,7 @@ function buildMessages(skills: PlanSkill[], ctx: GenerateContext) {
 				"- content：Markdown 正文，依次包含四个二级标题：## 为什么学它、## 核心概念、## 动手做一遍、## 容易踩的坑",
 				"  正文 500~800 字；代码用 ``` 代码块，操作步骤用有序列表；不要出现一级标题，不要重复 title",
 				"  content 绝不能为空或过短，每个技能点都要写满四个章节。",
+				"- references：2~4 条，每条都要能直接打开；url 必须完整的 https:// 具体页面；没有可靠来源就给空数组 []",
 			].join("\n"),
 		},
 	]
@@ -188,6 +203,8 @@ function validateChunk(value: unknown, skills: PlanSkill[]): PlanMaterial[] {
 				content: str(material.content, 80, 6000, "content"),
 				minutes: clampInt(material.minutes, 5, 60, 15),
 				difficulty: oneOf(material.difficulty, DIFFICULTIES, difficultyOf(skill.level)),
+				// 引用是加分项：解析失败/为空都不影响这篇内容成立
+				references: parseReferences(material.references ?? material.sources ?? material.links),
 				origin: "model",
 			})
 		} catch (error) {
@@ -246,6 +263,8 @@ function buildStub(skill: PlanSkill): PlanMaterial {
 		content,
 		minutes: difficultyOf(skill.level) === "beginner" ? 15 : 25,
 		difficulty: difficultyOf(skill.level),
+		// 兜底模板不编来源：宁可没有，也不能给假链接
+		references: [],
 		origin: "stub",
 	}
 }
@@ -315,6 +334,31 @@ export interface GenerateOptions {
 	chunkSize?: number
 	/** 块间并发上限，默认 CONCURRENCY */
 	concurrency?: number
+}
+
+/**
+ * 统一探测所有引用的可达性。
+ *
+ * 放在生成结束后一次性做：每条引用独立探测、并发执行，
+ * 探测本身失败（无外网 / 超时）不影响资料可用性。
+ */
+async function markReferenceStatus(materials: PlanMaterial[]): Promise<void> {
+	const total = materials.reduce((sum, material) => sum + material.references.length, 0)
+	if (total === 0) return
+
+	const refs = materials.flatMap((material) => material.references)
+	try {
+		const verified = await verifyReferences(refs)
+		let cursor = 0
+		for (const material of materials) {
+			const count = material.references.length
+			material.references = verified.slice(cursor, cursor + count)
+			cursor += count
+		}
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "unknown"
+		console.warn(`[plan-generator] reference probe failed: ${message}`)
+	}
 }
 
 /**
@@ -489,6 +533,7 @@ export async function generatePlanMaterials(
 		console.warn(
 			`[plan-generator] incomplete generated=${generated} missing=${missing.join("、")}`,
 		)
+		await markReferenceStatus(materials)
 		throw new PlanGenerationError(
 			`有 ${missing.length} 个技能点没生成出资料（${missing.slice(0, 3).join("、")}`
 			+ `${missing.length > 3 ? " 等" : ""}），可以稍后重试`,
@@ -497,6 +542,8 @@ export async function generatePlanMaterials(
 			materials.filter((material) => material.origin === "model"),
 		)
 	}
+
+	await markReferenceStatus(materials)
 
 	return {
 		materials,
@@ -532,6 +579,8 @@ export function persistMaterials(
 			difficulty: material.difficulty,
 			estimatedMinutes: material.minutes,
 			model: material.origin === "model" ? "llm" : "stub",
+			// 引用随正文一起落库，单关页直接读，不必再调模型
+			references: material.references.length > 0 ? JSON.stringify(material.references) : null,
 		}
 
 		const existingId = replaceById.get(material.skillId)

@@ -3,21 +3,19 @@ import {
 	findAssessmentByType,
 	findAssessmentQuestions,
 	findQuestionsByBatch,
-	findAllSkills,
-	findSkillsByPosition,
-	findUserProfile,
 	mergeProfileData,
-	parseProfileData,
 	upsertUserProfile,
 	upsertUserSkill,
 } from "../../../repositories/learning.repository"
 import { findUserByAccount } from "../../../repositories/user.repository"
+import { buildContextLines, resolveAssessmentContext } from "../../../utils/assessment-context"
 import { chatStream } from "../../../utils/llm"
 import { requireLlm } from "../../../utils/llm-guard"
 import { readSession } from "../../../utils/session"
 import { openSse } from "../../../utils/sse"
 import { applySkillLinks, mapConclusionToSkills } from "../../../utils/skill-link"
-import type { SkillCandidate, SkillLink } from "../../../utils/skill-link"
+import type { SkillLink } from "../../../utils/skill-link"
+import type { AssessmentContext } from "../../../utils/assessment-context"
 
 /**
  * 测评分析（流式）：POST /api/assessment/:type/analyze
@@ -64,17 +62,19 @@ function tryParseAnalysis(text: string): AnalysisResult | null {
  * 兜底联动：字符串子串匹配。
  *
  * 只在 LLM 语义映射（mapConclusionToSkills）失败时兜底。
+ * 匹配范围限定在**本次测评方向**的技能（ctx.skills），
+ * 此前用 findAllSkills() 全库匹配，测完 Java 会把日语方向的同名/近名技能也标掉。
+ *
  * 注意是**单向**包含 + 长度保护：早期版本用双向 includes，
  * 「学习能力强」这种长句会把名为「学习」的技能误判成已掌握。
  */
-function linkSkillsByKeyword(userId: number, result: AnalysisResult): void {
-	const allSkills = findAllSkills()
+function linkSkillsByKeyword(userId: number, result: AnalysisResult, ctx: AssessmentContext): void {
 	const mastered = new Set<string>()
 	const weak = new Set<string>()
 
 	const match = (text: string, bucket: Set<string>) => {
 		const lower = text.toLowerCase()
-		for (const skill of allSkills) {
+		for (const skill of ctx.skills) {
 			const name = skill.name.toLowerCase()
 			// 只有当「结论短语」不比技能名长太多时才认，避免长句误吞短技能名
 			if (lower.length > name.length + 2) continue
@@ -87,7 +87,7 @@ function linkSkillsByKeyword(userId: number, result: AnalysisResult): void {
 	for (const s of result.strengths) match(s, mastered)
 	for (const w of result.weaknesses) match(w, weak)
 
-	for (const skill of allSkills) {
+	for (const skill of ctx.skills) {
 		if (mastered.has(skill.name)) {
 			upsertUserSkill(userId, skill.id, "mastered", skill.level)
 		} else if (weak.has(skill.name)) {
@@ -99,31 +99,22 @@ function linkSkillsByKeyword(userId: number, result: AnalysisResult): void {
 /**
  * 把测评结论映射到技能图谱。
  *
- * 候选集取「用户已选方向的技能」，没有方向时退回已有技能，上限 12 个，
- * 避免把全站技能都塞进 prompt（技能库是动态且跨领域的，会撑爆 prompt）。
+ * 候选集严格取「本次测评方向的技能」，上限 12 个。
+ * 此前取 profile_data.aiDirection.positionId —— 那是首次选定的方向，
+ * 用户在别的方向做测评时，结论会被写到第一个方向的技能上。
  */
 async function linkSkillsFromConclusion(
 	userId: number,
 	result: AnalysisResult,
+	ctx: AssessmentContext,
 ): Promise<SkillLink[]> {
 	try {
-		const profile = findUserProfile(userId)
-		const profileData = parseProfileData(profile?.profile_data ?? null)
-		const positionId = (profileData.aiDirection as { positionId?: number } | undefined)?.positionId
-
-		const candidates: SkillCandidate[] = positionId
-			? findSkillsByPosition(positionId).map((skill) => ({
-					id: skill.id,
-					name: skill.name,
-					description: skill.description ?? null,
-					level: skill.level,
-				}))
-			: findAllSkills().slice(0, 12).map((skill) => ({
-					id: skill.id,
-					name: skill.name,
-					description: skill.description ?? null,
-					level: skill.level,
-				}))
+		const candidates = ctx.skills.slice(0, 12).map((skill) => ({
+			id: skill.id,
+			name: skill.name,
+			description: null,
+			level: skill.level,
+		}))
 
 		if (candidates.length === 0) return []
 
@@ -161,7 +152,7 @@ export default defineEventHandler(async (event) => {
 
 	requireLlm()
 
-	const body = await readBody<{ answers?: number[], batchId?: string }>(event).catch(() => null)
+	const body = await readBody<{ answers?: number[], batchId?: string, positionId?: number | null }>(event).catch(() => null)
 	const answers = body?.answers ?? []
 
 	// 优先按 batchId 取「当时真正展示给用户的那套动态题」；
@@ -180,6 +171,17 @@ export default defineEventHandler(async (event) => {
 		throw createError({ statusCode: 400, message: "答题数量不匹配" })
 	}
 
+	// 判定方向以「出题时那个方向」为准：用户在答题过程中可能切过方向，
+	// 用当前方向会把结论写到没测过的方向上。前端显式传的 positionId 只是兜底。
+	const batchPositionId = body?.batchId
+		? (questions[0] as { position_id?: number | null }).position_id ?? null
+		: null
+	const requested = Number(body?.positionId ?? 0)
+	const ctx = resolveAssessmentContext(
+		user.id,
+		batchPositionId ?? (requested > 0 ? requested : null),
+	)
+
 	const answeredCount = answers.reduce((sum, a) => sum + (a >= 0 ? 1 : 0), 0)
 
 	const answerLines = questions.map((q, i) => {
@@ -189,22 +191,29 @@ export default defineEventHandler(async (event) => {
 		return `${i + 1}. ${category}${q.question} → ${option}`
 	})
 
+	const directionName = ctx.positionName ?? "未指定方向"
+
 	const messages = [
 		{
 			role: "system" as const,
 			content: [
-				"你是学习顾问，根据测评作答判断学习者的偏好与基础，给出可执行的学习方向。",
+				`你是学习顾问，正在分析一次「${directionName}」方向的测评作答。`,
 				"硬性要求：",
 				"1. 只依据作答内容判断，不揣测身份、年龄、性别、学历。",
-				"2. 推荐方向必须是**具体的学习主题**（如「Python 数据处理」「品牌视觉设计」「日语 N4 备考」），不要写岗位名。",
-				"3. 建议要具体到下一步做什么，禁止套话。",
-				"4. 先用自然语言简要分析（2~3 句），然后输出 JSON 对象，用 ```json 代码块包裹。",
+				`2. 结论必须落在「${directionName}」这个方向上：strengths / weaknesses 尽量使用该方向技能图谱里的技能名，`,
+				"   不得引入其他方向、其他领域的内容（方向是日语就别评价编程能力）。",
+				"3. 推荐方向必须是**具体的学习主题**（如「Python 数据处理」「品牌视觉设计」「日语 N4 备考」），不要写岗位名。",
+				"4. 建议要具体到下一步做什么，禁止套话。",
+				"5. 先用自然语言简要分析（2~3 句），然后输出 JSON 对象，用 ```json 代码块包裹。",
 			].join("\n"),
 		},
 		{
 			role: "user" as const,
 			content: [
 				`测评名称：${assessment.title}`,
+				"本次测评的方向上下文：",
+				...buildContextLines(ctx),
+				"",
 				`学习者作答（共 ${questions.length} 题）：`,
 				...answerLines,
 				"",
@@ -214,7 +223,7 @@ export default defineEventHandler(async (event) => {
 				"```",
 				"",
 				"字段要求：",
-				"- direction：一个具体主题，不要写「综合开发」这种模糊说法",
+				`- direction：若方向已明确就写该方向下的具体主题（如「${directionName} · 语法基础」），不要写「综合开发」这种模糊说法`,
 				"- strengths / weaknesses：每条 15 字以内，必须能从作答里找到依据",
 				"- recommendation：给出先后顺序，不要只说「多加练习」",
 				"- suggestedTopics：每条 12 字以内，是学习者能直接搜索的学习内容",
@@ -246,40 +255,50 @@ export default defineEventHandler(async (event) => {
 				assessment.id,
 				answers,
 				answeredCount,
-				JSON.stringify({ ...parsed, aiGenerated: true }),
+				JSON.stringify({ ...parsed, aiGenerated: true, positionId: ctx.positionId }),
+				ctx.positionId,
 			)
 
 			if (type === "career") {
 				// 注意：profile_data 必须走 merge，不能整体覆盖——
 				// 否则会把 dailyMinutes / aiDirection 这些既有键冲掉
-				upsertUserProfile(user.id, {
-					assessment_completed: 1,
-					career_direction: parsed.careerDirection,
-				})
+				if (!ctx.positionId) {
+					// 只有「还没选方向」时，测评推荐才配当主方向；
+					// 已经有方向了再去覆盖，会把用户的主方向改成一个没建过路径的主题
+					upsertUserProfile(user.id, {
+						assessment_completed: 1,
+						career_direction: parsed.careerDirection,
+					})
+				} else {
+					upsertUserProfile(user.id, { assessment_completed: 1 })
+				}
 				mergeProfileData(user.id, {
-					lastAssessment: { ...parsed, at: new Date().toISOString() },
+					lastAssessment: {
+						...parsed,
+						positionId: ctx.positionId,
+						positionName: ctx.positionName,
+						at: new Date().toISOString(),
+					},
 					suggestedTopics: parsed.suggestedTopics,
 				})
 			}
 
 			// 测评结论 → 技能图谱：优先让模型做语义映射，失败再退化为关键词匹配
-			const linked = await linkSkillsFromConclusion(user.id, parsed)
+			// 候选集限定在本次方向，避免结论被写到别的方向技能上
+			const linked = await linkSkillsFromConclusion(user.id, parsed, ctx)
 			if (linked.length === 0) {
-				linkSkillsByKeyword(user.id, parsed)
+				linkSkillsByKeyword(user.id, parsed, ctx)
 			}
 
-			// 结果页要能直接跳到本人方向的图谱页
-			const resultProfile = findUserProfile(user.id)
-			const resultProfileData = parseProfileData(resultProfile?.profile_data ?? null)
-			const positionId = (resultProfileData.aiDirection as { positionId?: number } | undefined)?.positionId ?? null
-
+			// 结果页直接跳到「本次测评的方向」图谱页
 			sse.write("done", {
 				score: answeredCount,
 				total: questions.length,
 				result: parsed,
 				aiGenerated: true,
 				linked,
-				positionId,
+				positionId: ctx.positionId,
+				positionName: ctx.positionName,
 			})
 		} else {
 			sse.write("done", {
@@ -293,6 +312,8 @@ export default defineEventHandler(async (event) => {
 					suggestedTopics: [],
 				},
 				aiGenerated: false,
+				positionId: ctx.positionId,
+				positionName: ctx.positionName,
 				rawText: fullText.slice(0, 1000),
 			})
 		}

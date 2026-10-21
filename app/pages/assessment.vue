@@ -3,10 +3,22 @@ import { postSse } from "~/composables/useSse"
 
 useHead({ title: "能力测评 · FSP" })
 
+const route = useRoute()
+
 interface Question {
   question: string
   options: string[]
   category: string
+}
+
+interface Direction {
+  id: number
+  name: string
+  category: string
+  description: string | null
+  itemCount: number
+  completedCount: number
+  generationStatus: string
 }
 
 type Phase = "generating" | "quiz" | "analyzing" | "result" | "error"
@@ -15,6 +27,11 @@ const phase = ref<Phase>("generating")
 const questions = ref<Question[]>([])
 const answers = ref<number[]>([])
 const currentStep = ref(0)
+
+/** 可选学习方向（用户在学的），题目跟着它走 */
+const directions = ref<Direction[]>([])
+const selectedId = ref<number | null>(null)
+const activeDirection = computed(() => directions.value.find((d) => d.id === selectedId.value) ?? null)
 
 const streamText = ref("")
 const result = ref<{
@@ -30,8 +47,9 @@ const result = ref<{
   aiGenerated: boolean
   /** 已联动写入技能图谱的技能 */
   linked?: { skillId: number, name: string, status: string }[]
-  /** 用户已选方向的 id，用于结果页直接跳转 */
+  /** 本次测评的方向，用于结果页直接跳转 */
   positionId?: number | null
+  positionName?: string | null
 } | null>(null)
 
 /** 本次动态出题的批次号，提交时要回传，服务端才能取回当时这套题 */
@@ -55,19 +73,39 @@ const streamDisplay = computed(() => {
   return text.trim()
 })
 
+async function loadDirections() {
+  try {
+    const data = await $fetch<{ directions: Direction[], current: number | null }>("/api/assessment/directions")
+    directions.value = data.directions ?? []
+    selectedId.value = data.current ?? data.directions?.[0]?.id ?? null
+  } catch {
+    // 未登录 / 后端异常：不阻塞出题，走「无方向」的通用题
+    directions.value = []
+  }
+}
+
 async function generateQuestions() {
   phase.value = "generating"
   streamText.value = ""
   errorMsg.value = ""
+  questions.value = []
+  answers.value = []
+  batchId.value = null
+  currentStep.value = 0
 
   try {
-    await postSse("/api/assessment/generate", {}, {
+    // 方向跟着请求走：切换方向 → 重新出题，题目、批次号、答案全部重置
+    await postSse("/api/assessment/generate", { positionId: selectedId.value }, {
+      context: (data) => {
+        if (data && typeof data.positionId === "number") selectedId.value = data.positionId
+      },
       chunk: (data) => { streamText.value += data.text },
       done: (data) => {
         const qs = data.questions as Question[]
         if (Array.isArray(qs) && qs.length >= 3) {
           questions.value = qs
           batchId.value = data.batchId ?? null
+          if (typeof data.positionId === "number") selectedId.value = data.positionId
           answers.value = new Array(qs.length).fill(-1)
           currentStep.value = 0
           phase.value = "quiz"
@@ -84,13 +122,24 @@ async function generateQuestions() {
   }
 }
 
+async function switchDirection(id: number) {
+  // 同一个方向重复点不必重新出题；出错状态下允许点击重试
+  if (id === selectedId.value && phase.value !== "error") return
+  selectedId.value = id
+  await generateQuestions()
+}
+
 async function submit() {
   phase.value = "analyzing"
   streamText.value = ""
   errorMsg.value = ""
 
   try {
-    await postSse("/api/assessment/career/analyze", { answers: answers.value, batchId: batchId.value }, {
+    await postSse("/api/assessment/career/analyze", {
+      answers: answers.value,
+      batchId: batchId.value,
+      positionId: selectedId.value,
+    }, {
       chunk: (data) => { streamText.value += data.text },
       done: (data) => {
         result.value = data as typeof result.value
@@ -104,14 +153,47 @@ async function submit() {
   }
 }
 
-onMounted(generateQuestions)
+onMounted(async () => {
+  await loadDirections()
+  // 支持 /assessment?positionId=7 直达某个方向（图谱页 / 路线页可带过来）
+  const wanted = Number(route.query.positionId ?? 0)
+  if (wanted > 0 && directions.value.some((d) => d.id === wanted)) {
+    selectedId.value = wanted
+  }
+  await generateQuestions()
+})
 </script>
 
 <template>
   <UContainer class="py-10">
-    <div class="mb-8">
+    <div class="mb-6">
       <h1 class="text-2xl font-semibold tracking-tight">能力测评</h1>
-      <p class="mt-1 text-sm text-muted">基于你的信息量身定制题目，完成后生成画像与推荐方向</p>
+      <p class="mt-1 text-sm text-muted">
+        题目跟着你的学习方向走，切换方向即重新出题；完成后生成画像并联动技能图谱
+      </p>
+    </div>
+
+    <!-- 方向选择：测评范围随方向变化 -->
+    <div v-if="directions.length > 0" class="mx-auto mb-6 max-w-2xl">
+      <p class="mb-2 text-xs font-medium text-muted">测评方向</p>
+      <div class="flex flex-wrap gap-2">
+        <button
+          v-for="dir in directions"
+          :key="dir.id"
+          class="rounded-lg border px-3 py-2 text-left transition hover:bg-elevated disabled:cursor-not-allowed disabled:opacity-60"
+          :class="selectedId === dir.id ? 'border-primary bg-primary/10' : 'border-default'"
+          :disabled="phase === 'analyzing'"
+          @click="switchDirection(dir.id)"
+        >
+          <span class="block text-sm font-medium">{{ dir.name }}</span>
+          <span class="block text-xs text-muted">
+            {{ dir.category }}
+            <template v-if="dir.itemCount > 0"> · {{ dir.completedCount }}/{{ dir.itemCount }} 关</template>
+            <template v-else> · 尚未生成路线</template>
+          </span>
+        </button>
+      </div>
+      <p v-if="phase === 'quiz'" class="mt-2 text-xs text-muted">切换方向会重新出题，当前作答会丢失</p>
     </div>
 
     <!-- 出题中 -->
@@ -119,7 +201,9 @@ onMounted(generateQuestions)
       <div class="rounded-xl border border-default p-6">
         <div class="mb-4 flex items-center gap-3">
           <div class="size-3 animate-pulse rounded-full bg-primary" />
-          <span class="text-sm font-medium">大模型正在为你定制测评题目…</span>
+          <span class="text-sm font-medium">
+            {{ activeDirection ? `大模型正在为「${activeDirection.name}」定制测评题目…` : '大模型正在为你定制测评题目…' }}
+          </span>
         </div>
         <div v-if="streamDisplay" class="min-h-[80px] whitespace-pre-wrap text-sm leading-relaxed text-muted">
           {{ streamDisplay }}<span class="animate-pulse text-primary">▌</span>
@@ -156,6 +240,7 @@ onMounted(generateQuestions)
         </div>
         <h2 class="text-xl font-semibold">测评完成</h2>
         <p class="mt-2 text-muted">已完成 {{ result.score }} / {{ result.total }} 题</p>
+        <p v-if="result.positionName" class="mt-1 text-sm text-muted">方向：{{ result.positionName }}</p>
         <UBadge v-if="result.aiGenerated" color="success" variant="soft" size="sm" class="mt-2">
           大模型解读
         </UBadge>

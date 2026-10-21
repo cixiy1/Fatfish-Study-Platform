@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { postSse } from "~/composables/useSse"
+import type { GenRow } from "~/components/PlanGeneratingList.vue"
 
 useHead({ title: "技能图谱 · FSP" })
 
@@ -13,6 +14,18 @@ interface Skill {
   required_level: number
 }
 
+interface PathSyncSummary {
+  pathId: number
+  pathName: string
+  added: { skillId: number, name: string, reused: boolean }[]
+  removed: { skillId: number | null, name: string }[]
+  failed: string[]
+  reused: number
+  generated: number
+  reordered: boolean
+  error: string | null
+}
+
 interface EvolveResult {
   applied: boolean
   summary: string
@@ -20,6 +33,8 @@ interface EvolveResult {
   releveled: { skillId: number, name: string, requiredLevel: number }[]
   reordered: number
   pruned: { skillId: number, name: string }[]
+  pathSync?: PathSyncSummary | null
+  pathError?: string | null
 }
 
 const route = useRoute()
@@ -39,6 +54,49 @@ const evolving = ref(false)
 const evolveText = ref("")
 const evolveResult = ref<EvolveResult | null>(null)
 const evolveError = ref<string | null>(null)
+
+// 图谱改完后紧接着同步学习路线：新增节点要补关卡，缺资料的现场生成
+const pathRows = ref<GenRow[]>([])
+const pathElapsedMs = ref(0)
+const pathSync = ref<PathSyncSummary | null>(null)
+const pathError = ref<string | null>(null)
+let pathStartedAt = 0
+let pathTimer: ReturnType<typeof setInterval> | null = null
+
+function startPathTimer() {
+	stopPathTimer()
+	pathStartedAt = Date.now()
+	pathElapsedMs.value = 0
+	pathTimer = setInterval(() => {
+		pathElapsedMs.value = Date.now() - pathStartedAt
+	}, 500)
+}
+
+function stopPathTimer() {
+	if (pathTimer) {
+		clearInterval(pathTimer)
+		pathTimer = null
+	}
+}
+
+/** 路线同步的进度事件和路径生成同构，直接复用同一套槽位逻辑 */
+function upsertPathRow(
+	data: { skillId: number, index: number, total: number, name: string },
+	patch: Partial<GenRow>,
+) {
+	const existing = pathRows.value.find(row => row.skillId === data.skillId)
+	if (existing) {
+		Object.assign(existing, patch)
+		return
+	}
+	pathRows.value.push({
+		skillId: data.skillId,
+		index: data.index,
+		name: data.name,
+		status: "pending",
+		...patch,
+	})
+}
 
 async function loadData() {
   loading.value = true
@@ -123,12 +181,30 @@ async function aiEvolve() {
   evolveText.value = ""
   evolveResult.value = null
   evolveError.value = null
+  pathRows.value = []
+  pathSync.value = null
+  pathError.value = null
 
   try {
     await postSse(`/api/positions/${route.params.id}/evolve.stream`, {}, {
       chunk: (data) => { evolveText.value += data.text ?? "" },
+      graph: () => {
+        // 图谱已落库，后面的时间都花在补齐路线上——开始计时并铺骨架
+        startPathTimer()
+      },
+      path_start: () => {
+        if (!pathTimer) startPathTimer()
+      },
+      path_skill_start: (data) => upsertPathRow(data, { status: "writing", attempt: data.attempt }),
+      path_skill_retry: (data) => upsertPathRow(data, { status: "writing", attempt: data.attempt }),
+      path_skill_done: (data) => upsertPathRow(data, { status: "ok", material: data.material }),
+      path_skill_fail: (data) => upsertPathRow(data, { status: "failed", reason: data.reason }),
+      path_error: (data) => { pathError.value = data.message ?? "学习路线同步失败" },
+      path_done: (data) => { pathSync.value = data.result ?? null },
       done: async (data) => {
         evolveResult.value = data as EvolveResult
+        pathSync.value = (data.pathSync as PathSyncSummary | null) ?? pathSync.value
+        pathError.value = (data.pathError as string | null) ?? pathError.value
         if (data.applied) {
           await loadData()
         }
@@ -141,6 +217,7 @@ async function aiEvolve() {
     evolveError.value = e instanceof Error ? e.message : "演进失败"
   } finally {
     evolving.value = false
+    stopPathTimer()
   }
 }
 
@@ -153,6 +230,10 @@ const statusLabel = (skillId: number) => {
   const s = userSkillMap.value.get(skillId)
   return s === "mastered" ? "已掌握" : s === "learning" ? "学习中" : "未开始"
 }
+
+onBeforeUnmount(() => {
+  stopPathTimer()
+})
 </script>
 
 <template>
@@ -248,6 +329,15 @@ const statusLabel = (skillId: number) => {
         </div>
       </div>
 
+      <!-- 图谱已落库，正在给新增/缺失的节点补关卡：逐条从骨架变实体 -->
+      <PlanGeneratingList
+        v-if="evolving && pathRows.length > 0"
+        :rows="pathRows"
+        :elapsed-ms="pathElapsedMs"
+        title="图谱已更新，正在补齐新增节点的关卡内容"
+        class="mb-6"
+      />
+
       <UAlert
         v-if="evolveError && !evolving"
         color="error"
@@ -305,6 +395,50 @@ const statusLabel = (skillId: number) => {
         >
           模型认为当前图谱已经合理，没有提出改动。
         </p>
+
+        <!-- 学习路线同步结果：图谱改了，路线必须跟着改，否则两边对不上 -->
+        <div v-if="evolveResult.applied && pathSync" class="mt-4 rounded-lg bg-elevated/60 p-3">
+          <p class="mb-2 flex items-center gap-1.5 text-xs font-medium">
+            <UIcon name="i-lucide-route" class="size-3.5 text-primary" />
+            学习路线已同步 · {{ pathSync.pathName }}
+          </p>
+          <ul class="space-y-1 text-xs text-muted">
+            <li v-if="pathSync.added.length > 0">
+              新增 {{ pathSync.added.length }} 关（复用 {{ pathSync.reused }} 篇已有资料，新生成 {{ pathSync.generated }} 篇）
+            </li>
+            <li v-if="pathSync.removed.length > 0">
+              移除 {{ pathSync.removed.length }} 个未学关卡：
+              {{ pathSync.removed.map(item => item.name).join("、") }}
+            </li>
+            <li v-if="pathSync.added.length === 0 && pathSync.removed.length === 0">
+              没有需要增删的关卡，已按新图谱校正顺序。
+            </li>
+            <li v-if="pathSync.failed.length > 0" class="text-warning">
+              有 {{ pathSync.failed.length }} 个节点资料没生成出来（{{ pathSync.failed.join("、") }}），可到路线页重新生成。
+            </li>
+          </ul>
+          <UButton
+            to="/learning"
+            size="xs"
+            variant="soft"
+            class="mt-2.5"
+            label="去学习路线查看"
+            trailing-icon="i-lucide-arrow-right"
+          />
+        </div>
+
+        <p v-else-if="evolveResult.applied && !pathError" class="mt-3 text-xs text-muted">
+          这个方向还没有学习路线，图谱改动会在你生成路线时直接生效。
+        </p>
+
+        <UAlert
+          v-if="pathError"
+          color="warning"
+          variant="soft"
+          title="图谱已更新，但学习路线没同步成功"
+          :description="pathError"
+          class="mt-3"
+        />
       </div>
 
       <!-- 技能列表 -->
