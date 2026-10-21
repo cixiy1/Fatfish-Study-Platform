@@ -126,7 +126,11 @@ const difficultyLabel = (value: string) => {
         </div>
 
         <!-- 撰写中 / 待开始：骨架槽位 -->
-        <div v-else class="rounded-lg border border-dashed border-default p-4">
+        <div
+          v-else
+          class="skeleton-slot rounded-lg border border-dashed border-default p-4"
+          :class="{ 'is-writing': row.status === 'writing' }"
+        >
           <div class="flex items-start gap-3">
             <UBadge color="neutral" variant="soft" size="sm" class="mt-0.5 shrink-0 tabular-nums">
               {{ row.index }}
@@ -150,3 +154,48 @@ const difficultyLabel = (value: string) => {
     </ul>
   </div>
 </template>
+
+<style scoped>
+/*
+ * 正在撰写的那一条：一束光从左扫到右，
+ * 读起来是「这一条正在被逐字写出来」，而不是「这条在等」。
+ */
+.skeleton-slot {
+  position: relative;
+  overflow: hidden;
+}
+
+.skeleton-slot.is-writing::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    100deg,
+    transparent 35%,
+    var(--ui-primary) 50%,
+    transparent 65%
+  );
+  opacity: 0.08;
+  transform: translateX(-100%);
+  animation: ai-scan 1.6s ease-in-out infinite;
+}
+
+@keyframes ai-scan {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-slot.is-writing::after {
+    animation: none;
+    opacity: 0.04;
+    transform: none;
+  }
+}
+</style>

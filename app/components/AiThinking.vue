@@ -44,10 +44,38 @@ const elapsed = computed(() => {
       <span class="ml-auto text-xs tabular-nums text-muted">{{ elapsed }}</span>
     </div>
 
-    <div class="mt-4 h-1.5 overflow-hidden rounded-full bg-elevated">
-      <div class="h-full w-1/3 animate-pulse rounded-full bg-primary" />
+    <!-- 墨迹一点点写出来，像在把进度「写」满 -->
+    <div class="relative mt-4 h-1.5 overflow-hidden rounded-full bg-elevated">
+      <div class="ai-ink" />
     </div>
 
     <p class="mt-3 text-sm text-muted">{{ phase }}</p>
   </div>
 </template>
+
+<style scoped>
+.ai-ink {
+  height: 100%;
+  width: 6%;
+  border-radius: 9999px;
+  background: var(--ui-primary);
+  animation: ai-ink-grow 3.4s steps(16, end) infinite;
+}
+
+@keyframes ai-ink-grow {
+  0% {
+    width: 6%;
+  }
+
+  100% {
+    width: 93%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-ink {
+    width: 60%;
+    animation: none;
+  }
+}
+</style>
