@@ -16,6 +16,9 @@ import { openSse } from "../../../utils/sse"
 import { applySkillLinks, mapConclusionToSkills } from "../../../utils/skill-link"
 import type { SkillLink } from "../../../utils/skill-link"
 import type { AssessmentContext } from "../../../utils/assessment-context"
+import { countAnswered, describeAnswer } from "#shared/utils/assessment"
+import { QUESTION_KIND_LABEL } from "#shared/types/assessment"
+import type { AnswerValue } from "#shared/types/assessment"
 
 /**
  * 测评分析（流式）：POST /api/assessment/:type/analyze
@@ -152,44 +155,46 @@ export default defineEventHandler(async (event) => {
 
 	requireLlm()
 
-	const body = await readBody<{ answers?: number[], batchId?: string, positionId?: number | null }>(event).catch(() => null)
-	const answers = body?.answers ?? []
+	const body = await readBody<{ answers?: AnswerValue[], batchId?: string, positionId?: number | null }>(event).catch(() => null)
+	const answers: AnswerValue[] = body?.answers ?? []
 
 	// 优先按 batchId 取「当时真正展示给用户的那套动态题」；
 	// 没传（旧前端/种子题场景）才退回种子题库。
 	// 此前一律读种子题：模型出 6~8 题时要么数量对不上直接 400，
 	// 要么数量碰巧一致但「DB 第 i 题 + 前端第 i 个答案」错位，结论不可信。
-	const questions = body?.batchId
+	const stored = body?.batchId
 		? findQuestionsByBatch(body.batchId, user.id)
 		: findAssessmentQuestions(assessment.id)
 
-	if (questions.length === 0) {
+	if (stored.length === 0) {
 		throw createError({ statusCode: 400, message: "测评题目不存在，请重新生成" })
 	}
 
-	if (answers.length !== questions.length) {
+	if (answers.length !== stored.length) {
 		throw createError({ statusCode: 400, message: "答题数量不匹配" })
 	}
 
+	// 「得分」实为有效作答数：多选/填空/表单/量表各自有自己的完成判定，
+	// 不能再用 answer >= 0 去数（多选是数组、填空是字符串数组）
+	const answeredCount = countAnswered(stored.map((item) => item.question), answers)
+
+	const answerLines = stored.map((item, i) => {
+		const q = item.question
+		const kind = QUESTION_KIND_LABEL[q.kind] ?? q.kind
+		const category = q.category ? `［${q.category}］` : ""
+		return `${i + 1}. ${category}（${kind}）${q.question} → ${describeAnswer(q, answers[i] ?? null)}`
+	})
+
 	// 判定方向以「出题时那个方向」为准：用户在答题过程中可能切过方向，
 	// 用当前方向会把结论写到没测过的方向上。前端显式传的 positionId 只是兜底。
-	const batchPositionId = body?.batchId
-		? (questions[0] as { position_id?: number | null }).position_id ?? null
-		: null
+	const batchPositionId = body?.batchId ? stored[0].position_id : null
 	const requested = Number(body?.positionId ?? 0)
 	const ctx = resolveAssessmentContext(
 		user.id,
 		batchPositionId ?? (requested > 0 ? requested : null),
 	)
 
-	const answeredCount = answers.reduce((sum, a) => sum + (a >= 0 ? 1 : 0), 0)
-
-	const answerLines = questions.map((q, i) => {
-		const picked = answers[i]
-		const option = picked >= 0 ? q.options[picked] ?? "未作答" : "未作答"
-		const category = q.category ? `［${q.category}］` : ""
-		return `${i + 1}. ${category}${q.question} → ${option}`
-	})
+	const total = stored.length
 
 	const directionName = ctx.positionName ?? "未指定方向"
 
@@ -203,8 +208,12 @@ export default defineEventHandler(async (event) => {
 				`2. 结论必须落在「${directionName}」这个方向上：strengths / weaknesses 尽量使用该方向技能图谱里的技能名，`,
 				"   不得引入其他方向、其他领域的内容（方向是日语就别评价编程能力）。",
 				"3. 推荐方向必须是**具体的学习主题**（如「Python 数据处理」「品牌视觉设计」「日语 N4 备考」），不要写岗位名。",
-				"4. 建议要具体到下一步做什么，禁止套话。",
-				"5. 先用自然语言简要分析（2~3 句），然后输出 JSON 对象，用 ```json 代码块包裹。",
+				"4. 作答按题型标注了（单选/多选/填空/表单/自评/开放题），判读时区别对待：",
+				"   - 填空写错术语，说明该知识点只是「见过」，别判成完全不会；",
+				"   - 表单里填的学习条件（可投入时间、工具、阶段）只用于安排节奏，不作为能力评价；",
+				"   - 自评分与选择题表现矛盾时，以实际作答为准，并在 weaknesses 里点出「自评偏高/偏低」。",
+				"5. 建议要具体到下一步做什么，禁止套话。",
+				"6. 先用自然语言简要分析（2~3 句），然后输出 JSON 对象，用 ```json 代码块包裹。",
 			].join("\n"),
 		},
 		{
@@ -214,7 +223,7 @@ export default defineEventHandler(async (event) => {
 				"本次测评的方向上下文：",
 				...buildContextLines(ctx),
 				"",
-				`学习者作答（共 ${questions.length} 题）：`,
+				`学习者作答（共 ${total} 题）：`,
 				...answerLines,
 				"",
 				"请先简要分析作答情况，然后输出 JSON：",
@@ -293,7 +302,7 @@ export default defineEventHandler(async (event) => {
 			// 结果页直接跳到「本次测评的方向」图谱页
 			sse.write("done", {
 				score: answeredCount,
-				total: questions.length,
+				total,
 				result: parsed,
 				aiGenerated: true,
 				linked,
@@ -303,7 +312,7 @@ export default defineEventHandler(async (event) => {
 		} else {
 			sse.write("done", {
 				score: answeredCount,
-				total: questions.length,
+				total,
 				result: {
 					careerDirection: "待确认",
 					strengths: [],
@@ -318,7 +327,11 @@ export default defineEventHandler(async (event) => {
 			})
 		}
 	} catch (error) {
-		const message = error instanceof Error ? error.message : "分析失败"
+		const raw = error instanceof Error ? error.message : ""
+		// fetch failed 是 undici 报的网络层错误，直接显示会让用户以为系统坏了
+		const message = /fetch failed|ECONNRESET|ETIMEDOUT|socket hang up/i.test(raw)
+			? "大模型暂时连不上，检查网络或代理后重试"
+			: raw || "分析失败"
 		console.warn(`[assessment] stream failed user=${user.id} error=${message}`)
 		sse.write("error", { message })
 	} finally {

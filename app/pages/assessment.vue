@@ -1,15 +1,12 @@
 <script setup lang="ts">
 import { postSse } from "~/composables/useSse"
+import { countAnswered, emptyAnswer, isAnswered } from "#shared/utils/assessment"
+import { QUESTION_KIND_LABEL } from "#shared/types/assessment"
+import type { AnswerValue, AssessmentQuestion, QuestionKind } from "#shared/types/assessment"
 
 useHead({ title: "能力测评 · FSP" })
 
 const route = useRoute()
-
-interface Question {
-  question: string
-  options: string[]
-  category: string
-}
 
 interface Direction {
   id: number
@@ -24,8 +21,9 @@ interface Direction {
 type Phase = "generating" | "quiz" | "analyzing" | "result" | "error"
 
 const phase = ref<Phase>("generating")
-const questions = ref<Question[]>([])
-const answers = ref<number[]>([])
+const questions = ref<AssessmentQuestion[]>([])
+/** 每题一份作答值，形状随题型（单选 number / 多选 number[] / 填空 string[] / 表单对象…） */
+const answers = ref<AnswerValue[]>([])
 const currentStep = ref(0)
 
 /** 可选学习方向（用户在学的），题目跟着它走 */
@@ -60,6 +58,42 @@ const errorMsg = ref("")
 const progress = computed(() => {
   if (questions.value.length === 0) return 0
   return Math.round(((currentStep.value + 1) / questions.value.length) * 100)
+})
+
+const currentQuestion = computed(() => questions.value[currentStep.value] ?? null)
+const currentAnswer = computed(() => answers.value[currentStep.value] ?? null)
+const answeredTotal = computed(() => countAnswered(questions.value, answers.value))
+
+/** 开放题允许跳过（想不出就空着往下走），其他题型必须作答 */
+const canProceed = computed(() => {
+  const q = currentQuestion.value
+  if (!q) return false
+  if (q.kind === "text") return true
+  return isAnswered(q, currentAnswer.value)
+})
+
+/** 没答完时给出的具体提示，比统一的「填写后继续」更像人话 */
+const blockedHint = computed(() => {
+  switch (currentQuestion.value?.kind) {
+    case "single": return "选一个选项继续"
+    case "multi": return "至少选一项"
+    case "blank": return "把空填完继续"
+    case "form": return "必填项填完继续"
+    case "scale": return "选一个分数继续"
+    default: return ""
+  }
+})
+
+/** 写回当前题的作答（形状由题型决定，组件负责构造） */
+function updateAnswer(value: AnswerValue) {
+  answers.value[currentStep.value] = value
+}
+
+/** 题型分布：让用户一眼看到这次不是清一色选择题 */
+const kindSummary = computed(() => {
+  const counter = new Map<QuestionKind, number>()
+  for (const q of questions.value) counter.set(q.kind, (counter.get(q.kind) ?? 0) + 1)
+  return [...counter.entries()].map(([kind, count]) => ({ kind, count, label: QUESTION_KIND_LABEL[kind] }))
 })
 
 const streamDisplay = computed(() => {
@@ -101,12 +135,13 @@ async function generateQuestions() {
       },
       chunk: (data) => { streamText.value += data.text },
       done: (data) => {
-        const qs = data.questions as Question[]
+        const qs = data.questions as AssessmentQuestion[]
         if (Array.isArray(qs) && qs.length >= 3) {
           questions.value = qs
           batchId.value = data.batchId ?? null
           if (typeof data.positionId === "number") selectedId.value = data.positionId
-          answers.value = new Array(qs.length).fill(-1)
+          // 每种题型给一份形状正确的空作答，后面直接原位替换
+          answers.value = qs.map(emptyAnswer)
           currentStep.value = 0
           phase.value = "quiz"
         } else {
@@ -303,44 +338,51 @@ onMounted(async () => {
 
     <!-- 答题页 -->
     <div v-else-if="phase === 'quiz' && questions.length > 0" class="mx-auto max-w-2xl">
-      <UProgress :model-value="progress" class="mb-6" />
-      <p class="mb-4 text-sm text-muted">第 {{ currentStep + 1 }} / {{ questions.length }} 题</p>
+      <UProgress :model-value="progress" class="mb-4" />
+      <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <p class="text-sm text-muted">
+          第 {{ currentStep + 1 }} / {{ questions.length }} 题
+          <span class="text-xs">· 已答 {{ answeredTotal }}</span>
+        </p>
+        <!-- 题型分布：说明这次测评不是清一色选择题 -->
+        <div class="flex flex-wrap gap-1.5">
+          <UBadge v-for="item in kindSummary" :key="item.kind" color="neutral" variant="soft" size="sm">
+            {{ item.label }} {{ item.count }}
+          </UBadge>
+        </div>
+      </div>
 
       <UCard>
-        <h3 class="mb-1 font-medium">{{ questions[currentStep].question }}</h3>
-        <p class="mb-4 text-xs text-muted">{{ questions[currentStep].category }}</p>
-        <div class="space-y-2">
-          <button
-            v-for="(opt, i) in questions[currentStep].options"
-            :key="i"
-            class="flex w-full items-center gap-3 rounded-lg border p-3 text-left transition hover:bg-elevated"
-            :class="answers[currentStep] === i ? 'border-primary bg-primary/10' : 'border-default'"
-            @click="answers[currentStep] = i"
-          >
-            <div class="flex size-6 shrink-0 items-center justify-center rounded-full border" :class="answers[currentStep] === i ? 'border-primary bg-primary text-white' : ''">
-              <span v-if="answers[currentStep] === i" class="text-xs">✓</span>
-            </div>
-            <span class="text-sm">{{ opt }}</span>
-          </button>
-        </div>
+        <AssessmentQuestionCard
+          v-if="currentQuestion"
+          :question="currentQuestion"
+          :model-value="currentAnswer"
+          @update:model-value="updateAnswer"
+        />
       </UCard>
 
-      <div class="mt-6 flex justify-between">
+      <div class="mt-6 flex items-center justify-between">
         <UButton variant="soft" :disabled="currentStep === 0" label="上一题" @click="currentStep--" />
+        <span v-if="!canProceed" class="text-xs text-muted">{{ blockedHint }}</span>
         <UButton
           v-if="currentStep < questions.length - 1"
-          :disabled="answers[currentStep] === -1"
+          :disabled="!canProceed"
+          :class="canProceed ? '' : 'opacity-50'"
           label="下一题"
           @click="currentStep++"
         />
         <UButton
           v-else
           color="primary"
-          :disabled="answers[currentStep] === -1"
+          :disabled="!canProceed"
+          :class="canProceed ? '' : 'opacity-50'"
           label="提交测评"
           @click="submit"
         />
       </div>
+      <p v-if="currentQuestion?.kind === 'text'" class="mt-2 text-right text-xs text-muted">
+        开放题可以留空直接跳过
+      </p>
     </div>
 
     <!-- 错误页 -->

@@ -1,4 +1,6 @@
 import { getDb } from "../utils/db"
+import { normalizeQuestion } from "#shared/utils/assessment"
+import type { AnswerValue, AssessmentQuestion } from "#shared/types/assessment"
 
 /**
  * 学习平台数据访问层。
@@ -221,16 +223,86 @@ export function findAssessmentByType(type: string): { id: number, type: string, 
 }
 
 /**
+ * 库里一道题的原始行。
+ *
+ * 题型与题型专属配置（空位、表单字段、量表刻度）拆成 kind + meta_json 两列：
+ * 前者便于统计/筛选，后者只在出题时写一次，不需要建表。
+ */
+interface QuestionRow {
+	id: number
+	question: string
+	options: string | null
+	correct_index: number | null
+	category: string | null
+	sort_order: number
+	position_id?: number | null
+	kind?: string | null
+	meta_json?: string | null
+}
+
+/** 一道题的规范化结果：题目本体 + 归属方向 */
+export interface StoredQuestion {
+	id: number
+	position_id: number | null
+	sort_order: number
+	question: AssessmentQuestion
+}
+
+function safeArray(text: string | null): string[] {
+	if (!text) return []
+	try {
+		const parsed = JSON.parse(text) as unknown
+		return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : []
+	} catch {
+		return []
+	}
+}
+
+function safeMeta(text: string | null | undefined): Record<string, unknown> {
+	if (!text) return {}
+	try {
+		const parsed = JSON.parse(text) as unknown
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+	} catch {
+		return {}
+	}
+}
+
+/**
+ * 行 → 题目。
+ *
+ * 一律走 normalizeQuestion：种子题与历史动态题的 kind 都是 single，
+ * meta 为空也能还原成可渲染的单选；万一某行数据坏掉则返回 null 由调用方丢弃。
+ */
+function rowToQuestion(row: QuestionRow): StoredQuestion | null {
+	const meta = safeMeta(row.meta_json)
+	const question = normalizeQuestion({
+		kind: row.kind ?? "single",
+		question: row.question,
+		options: safeArray(row.options),
+		category: row.category ?? undefined,
+		...meta,
+	})
+	if (!question) return null
+	return {
+		id: row.id,
+		position_id: row.position_id ?? null,
+		sort_order: row.sort_order,
+		question,
+	}
+}
+
+/**
  * 取种子题库（owner_user_id IS NULL）。
  *
  * 语义固定为「系统预置题」；用户专属的动态题必须用 findQuestionsByBatch 取，
  * 两者不能混——此前 analyze 拿种子题去配对动态答案，题目和答案会错位。
  */
-export function findAssessmentQuestions(assessmentId: number): { id: number, question: string, options: string[], correct_index: number | null, category: string | null, sort_order: number }[] {
+export function findAssessmentQuestions(assessmentId: number): StoredQuestion[] {
 	const rows = getDb()
 		.prepare("SELECT * FROM assessment_questions WHERE assessment_id = ? AND owner_user_id IS NULL ORDER BY sort_order")
-		.all(assessmentId) as { id: number, question: string, options: string, correct_index: number | null, category: string | null, sort_order: number }[]
-	return rows.map((r) => ({ ...r, options: JSON.parse(r.options) as string[] }))
+		.all(assessmentId) as QuestionRow[]
+	return rows.map(rowToQuestion).filter((item): item is StoredQuestion => item !== null)
 }
 
 /**
@@ -239,30 +311,41 @@ export function findAssessmentQuestions(assessmentId: number): { id: number, que
  * 模型出的题此前从不入库，导致分析时只能拿种子题去对答案，
  * 题数不一致会直接 400，题数碰巧一致则题目与答案错位。
  * 现在按 batch_id 存一批，分析时原样取回。
+ *
+ * 题型配置（blanks / fields / scale / placeholder / hint）序列化进 meta_json，
+ * options 单独存，跟前端渲染所需字段一一对应。
  */
 export function insertDynamicQuestions(input: {
 	assessmentId: number
 	userId: number
 	batchId: string
 	positionId?: number | null
-	questions: { question: string, options: string[], category?: string }[]
+	questions: AssessmentQuestion[]
 }): void {
 	const stmt = getDb().prepare(
 		`INSERT INTO assessment_questions
-		 (assessment_id, question, options, correct_index, category, sort_order, owner_user_id, batch_id, source, position_id)
-		 VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 'ai', ?)`,
+		 (assessment_id, question, options, correct_index, category, sort_order, owner_user_id, batch_id, source, position_id, kind, meta_json)
+		 VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 'ai', ?, ?, ?)`,
 	)
 	const run = getDb().transaction(() => {
 		input.questions.forEach((q, index) => {
+			const meta: Record<string, unknown> = {}
+			if (q.blanks?.length) meta.blanks = q.blanks
+			if (q.fields?.length) meta.fields = q.fields
+			if (q.scale) meta.scale = q.scale
+			if (q.placeholder) meta.placeholder = q.placeholder
+			if (q.hint) meta.hint = q.hint
 			stmt.run(
 				input.assessmentId,
 				q.question,
-				JSON.stringify(q.options),
+				JSON.stringify(q.options ?? []),
 				q.category ?? null,
 				index,
 				input.userId,
 				input.batchId,
 				input.positionId ?? null,
+				q.kind,
+				Object.keys(meta).length > 0 ? JSON.stringify(meta) : null,
 			)
 		})
 	})
@@ -276,19 +359,19 @@ export function insertDynamicQuestions(input: {
  * 选 position_id：分析阶段要用「出题时那个方向」做判定范围，
  * 不能用当前方向（用户可能中途切换过）。
  */
-export function findQuestionsByBatch(batchId: string, userId: number): { id: number, question: string, options: string[], correct_index: number | null, category: string | null, sort_order: number, position_id: number | null }[] {
+export function findQuestionsByBatch(batchId: string, userId: number): StoredQuestion[] {
 	const rows = getDb()
 		.prepare(
 			"SELECT * FROM assessment_questions WHERE batch_id = ? AND owner_user_id = ? ORDER BY sort_order",
 		)
-		.all(batchId, userId) as { id: number, question: string, options: string, correct_index: number | null, category: string | null, sort_order: number, position_id: number | null }[]
-	return rows.map((r) => ({ ...r, options: JSON.parse(r.options) as string[] }))
+		.all(batchId, userId) as QuestionRow[]
+	return rows.map(rowToQuestion).filter((item): item is StoredQuestion => item !== null)
 }
 
 export function createAssessmentRecord(
 	userId: number,
 	assessmentId: number,
-	answers: number[],
+	answers: AnswerValue[],
 	score: number,
 	resultData: string,
 	positionId: number | null = null,

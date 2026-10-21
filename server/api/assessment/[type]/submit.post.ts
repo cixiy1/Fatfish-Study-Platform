@@ -4,10 +4,14 @@ import {
 	findAssessmentQuestions,
 	upsertUserProfile,
 } from "../../../repositories/learning.repository"
+import type { StoredQuestion } from "../../../repositories/learning.repository"
 import { findUserByAccount } from "../../../repositories/user.repository"
 import { chatJson } from "../../../utils/llm"
 import { asRecord, str, strArray } from "../../../utils/llm-json"
 import { readSession } from "../../../utils/session"
+import { countAnswered, describeAnswer, isAnswered } from "#shared/utils/assessment"
+import { QUESTION_KIND_LABEL } from "#shared/types/assessment"
+import type { AnswerValue } from "#shared/types/assessment"
 
 /**
  * 提交测评：POST /api/assessment/:type/submit
@@ -37,9 +41,9 @@ function validateAnalysis(value: unknown): AssessmentAnalysis {
 }
 
 /** 降级结果：只说事实，不推断方向 */
-function fallbackAnalysis(questions: { category: string | null }[], answers: number[]): AssessmentAnalysis {
+function fallbackAnalysis(questions: StoredQuestion[], answers: AnswerValue[]): AssessmentAnalysis {
 	const categories = questions
-		.map((question, index) => (answers[index] >= 0 ? question.category : null))
+		.map((item, index) => (isAnswered(item.question, answers[index] ?? null) ? item.question.category : null))
 		.filter((category): category is string => Boolean(category))
 
 	const unique = [...new Set(categories)].slice(0, 3)
@@ -64,8 +68,8 @@ export default defineEventHandler(async (event) => {
 	const assessment = findAssessmentByType(type)
 	if (!assessment) throw createError({ statusCode: 404, message: "测评不存在" })
 
-	const body = await readBody<{ answers?: number[] }>(event).catch(() => null)
-	const answers = body?.answers ?? []
+	const body = await readBody<{ answers?: AnswerValue[] }>(event).catch(() => null)
+	const answers: AnswerValue[] = body?.answers ?? []
 	const questions = findAssessmentQuestions(assessment.id)
 
 	if (answers.length !== questions.length) {
@@ -73,13 +77,14 @@ export default defineEventHandler(async (event) => {
 	}
 
 	// 题库没有标准答案，「得分」实际是完成题数，前端文案按完成量展示
-	const answeredCount = answers.reduce((sum, answer) => sum + (answer >= 0 ? 1 : 0), 0)
+	// 多选/填空/表单/量表各有各的完成判定，不能再用 answer >= 0 统一数
+	const answeredCount = countAnswered(questions.map((item) => item.question), answers)
 
-	const answerLines = questions.map((question, index) => {
-		const picked = answers[index]
-		const option = picked >= 0 ? question.options[picked] ?? "未作答" : "未作答"
-		const category = question.category ? `［${question.category}］` : ""
-		return `${index + 1}. ${category}${question.question} → ${option}`
+	const answerLines = questions.map((item, index) => {
+		const q = item.question
+		const category = q.category ? `［${q.category}］` : ""
+		const kind = QUESTION_KIND_LABEL[q.kind] ?? q.kind
+		return `${index + 1}. ${category}（${kind}）${q.question} → ${describeAnswer(q, answers[index] ?? null)}`
 	})
 
 	const messages = [

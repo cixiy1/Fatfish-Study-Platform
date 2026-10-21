@@ -401,6 +401,18 @@ const MIGRATIONS: Migration[] = [
 			CREATE INDEX IF NOT EXISTS idx_ar_position ON assessment_records(user_id, position_id);
 		`,
 	},
+	{
+		version: 11,
+		name: "assessment_question_kinds",
+		sql: `
+			-- 题型从「只有单选」扩展为单选/多选/填空/表单/自评量表/开放题。
+			-- kind 存在独立列便于统计与筛选；题型专属配置（空位、表单字段、
+			-- 量表刻度）体积小且只在出题时写入，统一塞 meta_json。
+			-- 存量种子题与旧动态题都是单选题，DEFAULT 'single' 恰好兼容。
+			ALTER TABLE assessment_questions ADD COLUMN kind TEXT NOT NULL DEFAULT 'single';
+			ALTER TABLE assessment_questions ADD COLUMN meta_json TEXT;
+		`,
+	},
 ]
 
 /** 幂等执行所有未应用的迁移 */
