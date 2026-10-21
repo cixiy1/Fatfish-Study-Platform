@@ -5,6 +5,32 @@ export interface DashboardNextItem {
   resourceTitle: string | null
 }
 
+/** 今日任务里的单个关卡（服务端打分 + 按剩余时长装包后下发） */
+export interface DashboardPlanItem {
+  id: number
+  pathId: number
+  pathName: string
+  index: number
+  pathTotal: number
+  skillId: number | null
+  skillName: string
+  resourceTitle: string | null
+  minutes: number
+  status: string
+  isReview: boolean
+  isPrimaryPath: boolean
+  score: number
+  reason: string
+}
+
+export interface DashboardTodayPlan {
+  items: DashboardPlanItem[]
+  budgetMinutes: number
+  spentMinutes: number
+  remainingMinutes: number
+  considered: number
+}
+
 export interface DashboardData {
   hasPath: boolean
   pathName: string | null
@@ -17,6 +43,8 @@ export interface DashboardData {
   dailyMinutes: number
   xp: number
   streak: number
+  /** 今日排好的关卡列表；旧缓存可能没有这个字段 */
+  todayPlan?: DashboardTodayPlan
   nextItem: DashboardNextItem | null
 }
 

@@ -1,7 +1,5 @@
 import { findUserByAccount } from "../repositories/user.repository"
 import {
-	findAllResources,
-	findAllSkills,
 	findLearningPathItems,
 	findLearningPathsByUser,
 	findPositionById,
@@ -9,9 +7,8 @@ import {
 } from "../repositories/learning.repository"
 import { getDb } from "../utils/db"
 import { readSession } from "../utils/session"
+import { buildTodayPlan } from "../utils/today-plan"
 
-/** 一关的预估时长（分钟），用于把每日目标换算成关卡数 */
-const MINUTES_PER_ITEM = 10
 /** 完成一关的 XP，答辩演示用固定值，不做成长数值系统 */
 const XP_PER_ITEM = 10
 
@@ -45,6 +42,9 @@ function calcStreak(dates: string[]): number {
 /**
  * 今日学习仪表盘：GET /api/dashboard
  * 一次聚合 Header / 首页需要的所有数字，避免前端打四五个接口。
+ *
+ * 「今天该学哪几关」由 today-plan 的打分器决定（复习紧迫度 / 依赖前置 /
+ * 掌握缺口 / 方向权重 / 剩余时长），这里只负责拼装统计数字。
  */
 export default defineEventHandler((event) => {
 	const session = readSession(event)
@@ -56,9 +56,6 @@ export default defineEventHandler((event) => {
 	const paths = findLearningPathsByUser(user.id)
 	const activePath = paths.find((p) => p.status === "active") ?? paths[0] ?? null
 	const items = activePath ? findLearningPathItems(activePath.id) : []
-
-	const skillNames = new Map(findAllSkills().map((s) => [s.id, s.name]))
-	const resourceTitles = new Map(findAllResources().map((r) => [r.id, r.title]))
 
 	const total = items.length
 	const completed = items.filter((i) => i.status === "completed").length
@@ -80,27 +77,34 @@ export default defineEventHandler((event) => {
 			SELECT DISTINCT date(i.completed_at, 'localtime') AS d
 			FROM learning_path_items i
 			JOIN learning_paths p ON p.id = i.path_id
-			WHERE p.user_id = ? AND i.completed_at IS NOT NULL
+			WHERE p.user_id = ? AND i.status = 'completed' AND i.completed_at IS NOT NULL
 			ORDER BY d DESC
 			LIMIT 400
 		`)
 		.all(user.id) as { d: string }[]
 
 	const { dailyMinutes } = getPlanSettings(user.id)
-	const todayGoal = Math.max(1, Math.round(dailyMinutes / MINUTES_PER_ITEM))
 
-	// 下一关 = 第一个未完成的 item（按 sort_order 已排序）
-	const nextIndex = items.findIndex((i) => i.status !== "completed")
-	const nextRaw = nextIndex >= 0 ? items[nextIndex] : null
+	// 今日任务：打分 + 按剩余分钟装包，可能跨方向
+	const plan = buildTodayPlan(user.id)
+	const first = plan.items[0] ?? null
 
+	// 今日目标 = 已完成关数 + 还排得下的关数；关都做完时至少显示 1，避免 0/0
+	const todayGoal = Math.max(1, todayDone + plan.items.length)
+
+	// 首关所在的方向优先展示（跨方向时首页标题才不会写错方向）
+	const focusPathId = first?.pathId ?? activePath?.id ?? null
+	const focusPath = focusPathId != null
+		? paths.find((p) => p.id === focusPathId) ?? activePath
+		: activePath
 	const position =
-		activePath?.target_position_id != null
-			? findPositionById(activePath.target_position_id)
+		focusPath?.target_position_id != null
+			? findPositionById(focusPath.target_position_id)
 			: null
 
 	return {
 		hasPath: Boolean(activePath),
-		pathName: activePath?.name ?? null,
+		pathName: focusPath?.name ?? null,
 		position: position ? { id: position.id, name: position.name } : null,
 		total,
 		completed,
@@ -110,12 +114,21 @@ export default defineEventHandler((event) => {
 		dailyMinutes,
 		xp: completed * XP_PER_ITEM,
 		streak: calcStreak(streakRows.map((r) => r.d)),
-		nextItem: nextRaw
+		/** 今日任务列表（按打分从高到低，且总时长不超预算） */
+		todayPlan: {
+			items: plan.items,
+			budgetMinutes: plan.budgetMinutes,
+			spentMinutes: plan.spentMinutes,
+			remainingMinutes: plan.remainingMinutes,
+			considered: plan.considered,
+		},
+		/** 兼容旧前端/Header：等价于 todayPlan.items[0] */
+		nextItem: first
 			? {
-					id: nextRaw.id,
-					index: nextIndex + 1,
-					skillName: nextRaw.skill_id ? (skillNames.get(nextRaw.skill_id) ?? "未命名技能") : "学习资源",
-					resourceTitle: nextRaw.resource_id ? (resourceTitles.get(nextRaw.resource_id) ?? null) : null,
+					id: first.id,
+					index: first.index,
+					skillName: first.skillName,
+					resourceTitle: first.resourceTitle,
 				}
 			: null,
 	}

@@ -848,10 +848,13 @@ export function reopenSkillsForReview(pathId: number, skillIds: number[]): numbe
 	if (skillIds.length === 0) return 0
 	const db = getDb()
 	const placeholders = skillIds.map(() => "?").join(",")
+	// 故意保留 completed_at：它是「上次学完的时间」，今日任务调度据此算复习紧迫度
+	// （原实现清空后就没法知道隔了多久）。所有统计口径都以 status = 'completed' 为准，
+	// 所以留着这个时间戳不会把复习关算进连胜或今日完成数。
 	return db
 		.prepare(`
 			UPDATE learning_path_items
-			SET status = 'pending', item_type = 'review', completed_at = NULL
+			SET status = 'pending', item_type = 'review'
 			WHERE path_id = ? AND skill_id IN (${placeholders}) AND status = 'completed'
 		`)
 		.run(pathId, ...skillIds).changes

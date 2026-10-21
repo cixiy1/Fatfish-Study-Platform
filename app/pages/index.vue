@@ -9,6 +9,12 @@ definePageMeta({ auth: false })
 const { user, isLoggedIn } = useAuthSession()
 const { dashboard } = useLearner()
 
+/** 今日排好的关卡（服务端已按优先级 + 剩余时长排好） */
+const plan = computed(() => dashboard.value?.todayPlan ?? null)
+const planItems = computed(() => plan.value?.items ?? [])
+const spentMinutes = computed(() => plan.value?.spentMinutes ?? 0)
+const budgetMinutes = computed(() => plan.value?.budgetMinutes ?? dashboard.value?.dailyMinutes ?? 20)
+
 useHead(() => ({
   title: isLoggedIn.value ? "今日学习 · FSP" : "FSP · AI 学习平台",
   meta: [
@@ -112,35 +118,67 @@ const steps = [
       />
     </div>
 
-    <!-- 下一关 -->
+    <!-- 今日任务：按优先级排好的关卡列表 -->
     <UCard class="mt-8">
       <template #header>
-        <div class="flex items-center justify-between">
-          <span class="font-medium">继续学习</span>
-          <UBadge variant="soft" color="neutral" size="sm">
-            {{ dashboard?.completed ?? 0 }}/{{ dashboard?.total ?? 0 }} 关
-          </UBadge>
+        <div class="flex items-center justify-between gap-2">
+          <div class="flex items-baseline gap-2">
+            <span class="font-medium">今日学习</span>
+            <span v-if="planItems.length > 0" class="text-xs text-muted">
+              {{ planItems.length }} 关 · 约 {{ planItems.reduce((sum, i) => sum + i.minutes, 0) }} 分钟
+            </span>
+          </div>
+          <div class="flex shrink-0 items-center gap-2">
+            <UBadge variant="soft" color="neutral" size="sm">
+              {{ spentMinutes }}/{{ budgetMinutes }} 分钟
+            </UBadge>
+            <UBadge variant="soft" color="neutral" size="sm">
+              {{ dashboard?.completed ?? 0 }}/{{ dashboard?.total ?? 0 }} 关
+            </UBadge>
+          </div>
         </div>
       </template>
 
-      <div v-if="dashboard?.nextItem">
-        <p class="text-xs text-muted">第 {{ dashboard.nextItem.index }} 关</p>
-        <p class="mt-1 text-lg font-medium">{{ dashboard.nextItem.skillName }}</p>
-        <p v-if="dashboard.nextItem.resourceTitle" class="mt-1 text-sm text-muted">
-          {{ dashboard.nextItem.resourceTitle }}
-        </p>
-        <UButton
-          class="mt-4"
-          :to="`/learn/${dashboard.nextItem.id}`"
-          size="lg"
-          label="开始这一关"
-          icon="i-lucide-play"
-        />
-      </div>
+      <ul v-if="planItems.length > 0" class="divide-y divide-default">
+        <li v-for="(item, i) in planItems" :key="item.id" class="py-3 first:pt-0 last:pb-0">
+          <div class="flex items-start gap-3">
+            <span
+              class="mt-0.5 grid size-6 shrink-0 place-items-center rounded-full text-xs font-medium tabular-nums"
+              :class="i === 0 ? 'bg-primary text-white' : 'bg-elevated text-muted'"
+            >
+              {{ i + 1 }}
+            </span>
+            <div class="min-w-0 flex-1">
+              <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span class="font-medium">{{ item.skillName }}</span>
+                <UBadge v-if="item.isReview" color="warning" variant="soft" size="sm">复习</UBadge>
+                <UBadge v-if="!item.isPrimaryPath" color="neutral" variant="soft" size="sm">
+                  {{ item.pathName }}
+                </UBadge>
+                <span class="text-xs text-muted tabular-nums">{{ item.minutes }} 分钟</span>
+              </div>
+              <p v-if="item.resourceTitle" class="mt-0.5 truncate text-sm text-muted">
+                {{ item.resourceTitle }}
+              </p>
+              <p class="mt-1 text-xs text-muted">{{ item.reason }}</p>
+            </div>
+            <UButton
+              :to="`/learn/${item.id}`"
+              size="sm"
+              :variant="i === 0 ? 'solid' : 'soft'"
+              :color="i === 0 ? 'primary' : 'neutral'"
+              :label="i === 0 ? '开始' : '去学习'"
+              class="mt-0.5 shrink-0"
+            />
+          </div>
+        </li>
+      </ul>
 
       <div v-else-if="dashboard?.hasPath" class="py-2">
         <p class="font-medium">全部关卡已完成</p>
-        <p class="mt-1 text-sm text-muted">查看学习复盘，或切换学习方向开启新路径。</p>
+        <p class="mt-1 text-sm text-muted">
+          查看学习复盘，或切换学习方向开启新路径。
+        </p>
         <div class="mt-4 flex gap-2">
           <UButton to="/reports" variant="soft" label="查看复盘" />
           <UButton to="/onboarding" variant="ghost" color="neutral" label="切换方向" />
